@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-coding-agent"
+version = "0.1.0"
+description = "A lightweight coding agent implemented from scratch."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+coding-agent = "coding_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
