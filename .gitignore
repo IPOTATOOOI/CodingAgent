@@ -1,28 +1,28 @@
-# Python
+# Python 生成文件
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
 
-# Virtual environments
+# 虚拟环境
 .venv/
 venv/
 env/
 
-# Environment variables / secrets
+# 环境变量和密钥
 .env
 .env.local
 
-# Test / cache
+# 测试和缓存
 .pytest_cache/
 .coverage
 htmlcov/
 
-# IDE
+# 编辑器配置
 .vscode/
 .idea/
 
-# OS
+# 操作系统生成文件
 .DS_Store
 Thumbs.db

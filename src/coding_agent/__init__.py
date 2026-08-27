@@ -1,3 +1,3 @@
-"""Mini Coding Agent package."""
+"""迷你编程智能体软件包。"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
