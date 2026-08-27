@@ -1,4 +1,4 @@
-"""Module entry point for ``python -m coding_agent``."""
+"""支持 ``python -m coding_agent`` 的模块入口。"""
 
 from coding_agent.cli import main
 

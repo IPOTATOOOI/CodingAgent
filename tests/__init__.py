@@ -1,1 +1,1 @@
-"""Tests for Mini Coding Agent."""
+"""迷你编程智能体测试包。"""
