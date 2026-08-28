@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from coding_agent.tools.command import (
+    CommandTools,
+    DEFAULT_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+)
 from coding_agent.tools.filesystem import FilesystemTools, ToolError
 
 
@@ -89,7 +95,7 @@ class ToolRegistry:
     def _validate_arguments(
         schema: dict[str, Any], arguments: dict[str, Any]
     ) -> str | None:
-        """验证当前五个工具所需的 JSON Schema 子集。"""
+        """验证当前六个工具所需的 JSON Schema 子集。"""
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         for name in required:
@@ -106,6 +112,15 @@ class ToolRegistry:
             allowed_types = expected if isinstance(expected, list) else [expected]
             if not ToolRegistry._matches_type(value, allowed_types):
                 return f"Argument '{name}' has the wrong type."
+            if isinstance(value, list):
+                minimum_items = property_schema.get("minItems")
+                if minimum_items is not None and len(value) < minimum_items:
+                    return f"Argument '{name}' contains too few items."
+                item_type = property_schema.get("items", {}).get("type")
+                if item_type is not None and any(
+                    not ToolRegistry._matches_type(item, [item_type]) for item in value
+                ):
+                    return f"Argument '{name}' contains an item of the wrong type."
             if isinstance(value, int) and not isinstance(value, bool):
                 if "minimum" in property_schema and value < property_schema["minimum"]:
                     return f"Argument '{name}' is below its minimum."
@@ -120,6 +135,7 @@ class ToolRegistry:
             "string": lambda item: isinstance(item, str),
             "integer": lambda item: isinstance(item, int)
             and not isinstance(item, bool),
+            "array": lambda item: isinstance(item, list),
             "null": lambda item: item is None,
         }
         return any(checks[item](value) for item in allowed_types if item in checks)
@@ -131,8 +147,9 @@ class ToolRegistry:
 
 
 def create_tool_registry(workspace_root: Path) -> ToolRegistry:
-    """为指定工作区创建 Stage 3 的五个文件工具。"""
+    """为指定工作区创建 Stage 4 的六个本地工具。"""
     filesystem = FilesystemTools(workspace_root)
+    commands = CommandTools(workspace_root)
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -273,6 +290,48 @@ def create_tool_registry(workspace_root: Path) -> ToolRegistry:
                 "additionalProperties": False,
             },
             handler=filesystem.edit_file,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_command",
+            description=(
+                "Execute a non-interactive local development command inside a working "
+                "directory under the current workspace. The command is executed without "
+                "a shell. Use separate array elements for the executable and every "
+                "argument; do not use shell operators such as &&, |, >, or <. Returns "
+                "stdout, stderr, exit code, timeout status, and truncation status."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": (
+                            "Executable followed by each argument as separate strings."
+                        ),
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Working directory relative to the workspace root."
+                        ),
+                        "default": ".",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": MIN_TIMEOUT_SECONDS,
+                        "maximum": MAX_TIMEOUT_SECONDS,
+                        "description": "Maximum execution time in seconds.",
+                        "default": DEFAULT_TIMEOUT_SECONDS,
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            handler=commands.run_command,
         )
     )
     return registry

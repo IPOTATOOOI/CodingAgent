@@ -1,8 +1,9 @@
-"""第二阶段命令行编排与工具解析测试。"""
+"""第四阶段命令行编排、执行反馈与工具解析测试。"""
 
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +12,7 @@ from coding_agent.cli import (
     SYSTEM_PROMPT,
     ToolResolutionLimitError,
     _format_tool_trace,
+    _format_tool_result_trace,
     _safe_print,
     main,
     resolve_user_turn,
@@ -175,7 +177,7 @@ class CliTests(unittest.TestCase):
             ["system", "user", "assistant", "tool", "assistant", "tool", "assistant"],
         )
 
-    def test_third_tool_response_is_rejected_without_execution(self) -> None:
+    def test_fourth_tool_response_is_rejected_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             (workspace / "README.md").write_text("text", encoding="utf-8")
@@ -194,7 +196,15 @@ class CliTests(unittest.TestCase):
                     None,
                     [
                         ToolCall(
-                            "call-3",
+                            "call-3", "read_file", '{"path":"README.md"}'
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-4",
                             "write_file",
                             '{"path":"forbidden.txt","content":"no"}',
                         )
@@ -211,8 +221,89 @@ class CliTests(unittest.TestCase):
 
             self.assertFalse((workspace / "forbidden.txt").exists())
 
-        self.assertEqual(client.complete.call_count, 3)
+        self.assertEqual(client.complete.call_count, 4)
         self.assertEqual(conversation.messages[-1]["role"], "assistant")
+
+    def test_three_tool_rounds_can_inspect_edit_and_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / "calculator.py"
+            target.write_text(
+                "def add(a, b):\n    return a - b\n", encoding="utf-8"
+            )
+            registry = create_tool_registry(workspace)
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [ToolCall("call-1", "read_file", '{"path":"calculator.py"}')],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-2",
+                            "edit_file",
+                            json.dumps(
+                                {
+                                    "path": "calculator.py",
+                                    "old_text": "return a - b",
+                                    "new_text": "return a + b",
+                                }
+                            ),
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-3",
+                            "run_command",
+                            json.dumps(
+                                {
+                                    "command": [
+                                        sys.executable,
+                                        "-c",
+                                        (
+                                            "from calculator import add; "
+                                            "raise SystemExit(0 if add(2, 3) == 5 else 1)"
+                                        ),
+                                    ],
+                                    "cwd": ".",
+                                    "timeout_seconds": 30,
+                                }
+                            ),
+                        )
+                    ],
+                ),
+                LLMResponse("I fixed add() and execution succeeded.", []),
+            ]
+            conversation = Conversation("System prompt")
+            conversation.add_user_message("Fix add and verify it")
+
+            with patch("sys.stdout", io.StringIO()):
+                result = resolve_user_turn(client, conversation, registry)
+
+        self.assertEqual(result, "I fixed add() and execution succeeded.")
+        self.assertEqual(client.complete.call_count, 4)
+        self.assertEqual(
+            [message["role"] for message in conversation.messages],
+            [
+                "system",
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+            ],
+        )
+        execution_result = json.loads(conversation.messages[-2]["content"])
+        self.assertTrue(execution_result["success"])
+        self.assertEqual(execution_result["data"]["exit_code"], 0)
 
     def test_mutation_trace_only_displays_path(self) -> None:
         trace = _format_tool_trace(
@@ -233,13 +324,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(trace, "[tool] edit_file(path='app.py')")
         self.assertEqual(write_trace, "[tool] write_file(path='new.py')")
 
-    def test_system_prompt_describes_editing_without_execution(self) -> None:
+    def test_command_trace_and_result_do_not_print_full_output(self) -> None:
+        tool_call = ToolCall(
+            "call-1",
+            "run_command",
+            '{"command":["python","-m","pytest"],"cwd":"."}',
+        )
+        trace = _format_tool_trace(tool_call)
+        result_trace = _format_tool_result_trace(
+            tool_call,
+            {
+                "success": True,
+                "data": {
+                    "exit_code": 1,
+                    "timed_out": False,
+                    "stdout": "failure details",
+                    "stderr": "",
+                },
+            },
+        )
+
+        self.assertIn("command=['python', '-m', 'pytest']", trace)
+        self.assertEqual(
+            result_trace,
+            "[result] exit_code=1, stdout=15 chars, stderr=0 chars",
+        )
+        self.assertNotIn("failure details", result_trace)
+
+    def test_system_prompt_requires_execution_evidence(self) -> None:
         lowered = SYSTEM_PROMPT.lower()
 
         self.assertNotIn("read-only access", lowered)
-        self.assertIn("edit existing text files", lowered)
-        self.assertIn("does not allow command execution", lowered)
-        self.assertIn("never claim", lowered)
+        self.assertIn("create and edit utf-8 text files", lowered)
+        self.assertIn("run_command", lowered)
+        self.assertIn("never claim tests passed", lowered)
+        self.assertIn("does not imply that the code is correct", lowered)
 
     def test_empty_input_does_not_call_llm(self) -> None:
         client = Mock()

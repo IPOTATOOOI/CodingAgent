@@ -1,4 +1,4 @@
-"""第三阶段文件观察与修改对话的命令行界面。"""
+"""第四阶段文件操作与本地执行对话的命令行界面。"""
 
 import argparse
 import json
@@ -13,16 +13,19 @@ from coding_agent.tools.registry import ToolRegistry, create_tool_registry
 
 
 SYSTEM_PROMPT = """You are Mini Coding Agent, a programming assistant with access to the current workspace.
-You may inspect directories, read UTF-8 text files, search literal text, create new text files, and edit existing text files using the provided tools.
+You may inspect project files, search text, create and edit UTF-8 text files, and execute non-interactive development commands using the provided tools.
 Before modifying an existing file, inspect the relevant code first.
 Use edit_file for existing files and write_file only for new files.
-The current environment does not allow command execution, compilation, or tests.
+Use run_command when actual execution feedback is necessary, especially for tests, scripts, compilers, and builds.
+Do not use shell operators, install packages, start interactive programs, or start background processes.
 Never claim that you inspected a local file unless you actually obtained its content through a tool.
-Never claim that a code change has been verified by execution or tests."""
+Never claim tests passed unless run_command actually produced evidence that they passed.
+A successful file edit does not imply that the code is correct.
+If execution reveals that additional repair is needed after the tool-round limit, explain the remaining issue instead of claiming success."""
 
 
 class ToolResolutionLimitError(RuntimeError):
-    """模型在第三次请求中再次调用工具时抛出的限制异常。"""
+    """模型在第四次请求中再次调用工具时抛出的限制异常。"""
 
 
 def resolve_user_turn(
@@ -30,7 +33,7 @@ def resolve_user_turn(
     conversation: Conversation,
     registry: ToolRegistry,
 ) -> str:
-    """完成一次用户回合，最多解析两轮明确受限的工具调用。"""
+    """完成一次用户回合，最多解析三轮明确受限的工具调用。"""
     first_response = client.complete(conversation.messages, tools=registry.schemas)
     if not first_response.tool_calls:
         content = _require_content(first_response)
@@ -47,11 +50,19 @@ def resolve_user_turn(
 
     _resolve_tool_calls(second_response, conversation, registry)
 
+    third_response = client.complete(conversation.messages, tools=registry.schemas)
+    if not third_response.tool_calls:
+        content = _require_content(third_response)
+        conversation.add_assistant_message(content)
+        return content
+
+    _resolve_tool_calls(third_response, conversation, registry)
+
     final_response = client.complete(conversation.messages, tools=registry.schemas)
     if final_response.tool_calls:
         message = (
-            "Stage 3 tool round limit reached. "
-            "The requested task requires another tool interaction."
+            "Stage 4 tool round limit reached. The execution result may require "
+            "additional work, but Stage 4 does not support iterative autonomous repair."
         )
         conversation.add_assistant_message(message)
         raise ToolResolutionLimitError(message)
@@ -66,10 +77,10 @@ def run_cli(
     workspace_root: Path | None = None,
     registry: ToolRegistry | None = None,
 ) -> None:
-    """运行带工作区文件观察与修改能力的多轮对话。"""
+    """运行带工作区文件操作与本地执行能力的多轮对话。"""
     workspace = (workspace_root or Path.cwd()).resolve()
     print("Mini Coding Agent")
-    print("Stage 3 - File editing tools")
+    print("Stage 4 - Local command execution")
     print()
     _safe_print(f"Workspace: {workspace}")
     print()
@@ -153,6 +164,9 @@ def _resolve_tool_calls(
             tool_call.id,
             json.dumps(result, ensure_ascii=False),
         )
+        result_trace = _format_tool_result_trace(tool_call, result)
+        if result_trace is not None:
+            _safe_print(result_trace)
 
 
 def _format_tool_trace(tool_call: ToolCall) -> str:
@@ -170,6 +184,7 @@ def _format_tool_trace(tool_call: ToolCall) -> str:
         "search_text": ("query", "path", "max_results"),
         "write_file": ("path",),
         "edit_file": ("path",),
+        "run_command": ("command", "cwd", "timeout_seconds"),
     }.get(tool_call.name, ())
     parts = []
     for name in visible_names:
@@ -181,6 +196,29 @@ def _format_tool_trace(tool_call: ToolCall) -> str:
             displayed = f"{displayed[:77]}..."
         parts.append(f"{name}={displayed}")
     return f"[tool] {tool_call.name}({', '.join(parts)})"
+
+
+def _format_tool_result_trace(
+    tool_call: ToolCall, result: dict[str, Any]
+) -> str | None:
+    """为命令工具构造不包含完整输出的结果摘要。"""
+    if tool_call.name != "run_command":
+        return None
+    if not result.get("success"):
+        return f"[result] error={result.get('error', 'ToolExecutionError')}"
+
+    data = result.get("data", {})
+    stdout_length = len(data.get("stdout", ""))
+    stderr_length = len(data.get("stderr", ""))
+    if data.get("timed_out"):
+        return (
+            "[result] timed_out=true, "
+            f"stdout={stdout_length} chars, stderr={stderr_length} chars"
+        )
+    return (
+        f"[result] exit_code={data.get('exit_code')}, "
+        f"stdout={stdout_length} chars, stderr={stderr_length} chars"
+    )
 
 
 def _safe_print(text: str) -> None:

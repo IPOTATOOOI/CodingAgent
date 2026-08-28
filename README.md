@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 3: Workspace-scoped file editing.
+Stage 4: Local command execution.
 
 The project currently supports:
 
@@ -18,15 +18,19 @@ The project currently supports:
 - Literal text search
 - Create-only UTF-8 text file writing
 - Exact, unique text replacement in existing files
+- Shell-free non-interactive local command execution
+- Separate stdout, stderr, exit-code, and timeout feedback
+- Bounded command output returned to the model
 - Structured local tool execution
-- At most two explicit tool-call rounds per user turn
+- At most three explicit tool-call rounds per user turn
 
 It does not yet support:
 
-- Command execution
-- Running, compiling, or testing code
-- Autonomous multi-step agent loops
+- Unrestricted autonomous repair loops
 - Context compaction
+- Persistent or interactive shell sessions
+- Background processes
+- OS-level execution sandboxing
 
 ## Requirements
 
@@ -79,22 +83,34 @@ excluded from file reading and text search; `.env.example` remains inspectable.
 `edit_file` changes an existing UTF-8 text file only when `old_text` occurs exactly
 once. Neither tool creates missing directories. Files larger than 1 MiB are rejected.
 
+`run_command` accepts an executable and arguments as a string array, uses
+`shell=False`, disables interactive input, and restricts its working directory to the
+workspace. Commands have a 30-second default timeout, a 120-second maximum timeout,
+and separate 12000-character stdout/stderr context limits. The Agent's
+`LLM_API_KEY` is removed from the child process environment.
+
+This is shell-free local command execution with workspace-scoped working directories
+and execution limits. It is not an OS-level sandbox: child processes still run with
+the permissions of the current operating-system user.
+
 Example session:
 
 ```text
 Mini Coding Agent
-Stage 3 - File editing tools
+Stage 4 - Local command execution
 
 Workspace: /path/to/project
 
 Type your message.
 Type /exit to quit.
 
-> Inspect calculator.py and add proper handling for division by zero.
+> Inspect calculator.py, fix the implementation bug, and run the tests.
 [tool] read_file(path='calculator.py')
 [tool] edit_file(path='calculator.py')
+[tool] run_command(command=['python', '-m', 'pytest', '-q'], cwd='.')
+[result] exit_code=0, stdout=20 chars, stderr=0 chars
 Assistant:
-<assistant response describing the change and stating that tests were not run>
+<assistant response grounded in the real command result>
 > /exit
 Exiting Mini Coding Agent.
 ```
@@ -105,8 +121,10 @@ You can try this flow without touching the agent's own source tree:
 python -m coding_agent --workspace examples/demo_project
 ```
 
-Stage 3 can inspect and modify the demo file, but it cannot execute the file or run
-tests. A successful edit means the text was written; it does not verify correctness.
+Stage 4 can inspect, modify, and execute the demo project. A non-zero process exit
+code remains a successful tool invocation: it means the command ran and the target
+program reported failure. After three tool rounds the Agent reports any remaining
+problem instead of starting an unrestricted repair loop.
 
 ## Development Stages
 

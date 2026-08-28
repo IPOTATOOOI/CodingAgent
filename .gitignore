@@ -34,3 +34,4 @@ examples/*
 !examples/demo_project/
 examples/demo_project/*
 !examples/demo_project/calculator.py
+!examples/demo_project/test_calculator.py

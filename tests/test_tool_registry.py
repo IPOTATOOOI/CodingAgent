@@ -1,6 +1,8 @@
 """工具注册、schema、参数校验和分发测试。"""
 
+import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -17,7 +19,7 @@ class ToolRegistryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def test_five_tools_are_registered_with_schemas(self) -> None:
+    def test_six_tools_are_registered_with_schemas(self) -> None:
         self.assertEqual(
             self.registry.names,
             (
@@ -26,9 +28,10 @@ class ToolRegistryTests(unittest.TestCase):
                 "search_text",
                 "write_file",
                 "edit_file",
+                "run_command",
             ),
         )
-        self.assertEqual(len(self.registry.schemas), 5)
+        self.assertEqual(len(self.registry.schemas), 6)
         self.assertEqual(
             [schema["function"]["name"] for schema in self.registry.schemas],
             list(self.registry.names),
@@ -70,6 +73,40 @@ class ToolRegistryTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error"], "FileAlreadyExists")
+
+    def test_run_command_schema_contains_bounded_arguments(self) -> None:
+        schema = next(
+            item["function"]
+            for item in self.registry.schemas
+            if item["function"]["name"] == "run_command"
+        )
+
+        properties = schema["parameters"]["properties"]
+        self.assertEqual(properties["command"]["type"], "array")
+        self.assertIn("cwd", properties)
+        self.assertEqual(properties["timeout_seconds"]["maximum"], 120)
+
+    def test_run_command_rejects_string_instead_of_array(self) -> None:
+        result = self.registry.execute(
+            "run_command", '{"command":"python -m unittest"}'
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "InvalidArguments")
+
+    def test_nonzero_command_exit_is_a_successful_tool_result(self) -> None:
+        result = self.registry.execute(
+            "run_command",
+            json.dumps(
+                {
+                    "command": [sys.executable, "-c", "raise SystemExit(3)"],
+                    "timeout_seconds": 30,
+                }
+            ),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["exit_code"], 3)
 
 
 if __name__ == "__main__":
