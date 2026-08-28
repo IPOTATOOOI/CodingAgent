@@ -1,4 +1,4 @@
-"""只读工具的 schema、参数验证和分发。"""
+"""文件工具的 schema、参数验证和分发。"""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -89,7 +89,7 @@ class ToolRegistry:
     def _validate_arguments(
         schema: dict[str, Any], arguments: dict[str, Any]
     ) -> str | None:
-        """验证当前三个工具所需的 JSON Schema 子集。"""
+        """验证当前五个工具所需的 JSON Schema 子集。"""
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         for name in required:
@@ -131,7 +131,7 @@ class ToolRegistry:
 
 
 def create_tool_registry(workspace_root: Path) -> ToolRegistry:
-    """为指定工作区创建 Stage 2 的三个只读工具。"""
+    """为指定工作区创建 Stage 3 的五个文件工具。"""
     filesystem = FilesystemTools(workspace_root)
     registry = ToolRegistry()
     registry.register(
@@ -217,6 +217,62 @@ def create_tool_registry(workspace_root: Path) -> ToolRegistry:
                 "additionalProperties": False,
             },
             handler=filesystem.search_text,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="write_file",
+            description=(
+                "Create a new UTF-8 text file inside the current workspace. "
+                "This tool refuses to overwrite an existing file and does not "
+                "create missing parent directories."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "New file path relative to the workspace root.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Complete UTF-8 text content for the new file.",
+                    },
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+            handler=filesystem.write_file,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="edit_file",
+            description=(
+                "Modify an existing UTF-8 text file inside the current workspace by "
+                "replacing one exact, uniquely occurring text block. The tool refuses "
+                "missing or ambiguous old_text and never replaces multiple matches."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Existing file path relative to the workspace root.",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact, uniquely occurring text to replace.",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text; it may be empty.",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
+                "additionalProperties": False,
+            },
+            handler=filesystem.edit_file,
         )
     )
     return registry

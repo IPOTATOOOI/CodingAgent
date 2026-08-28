@@ -1,4 +1,4 @@
-"""受工作区边界约束的只读文件系统工具。"""
+"""受工作区边界约束的文件系统工具。"""
 
 import os
 from collections.abc import Iterator
@@ -46,7 +46,7 @@ def resolve_workspace_path(workspace_root: Path, user_path: str) -> Path:
 
 
 class FilesystemTools:
-    """提供三个受限的工作区只读操作。"""
+    """提供受限的工作区读取、搜索、创建和编辑操作。"""
 
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root.resolve()
@@ -183,6 +183,100 @@ class FilesystemTools:
                     }
 
         return {"query": query, "matches": matches, "truncated": False}
+
+    def write_file(self, path: str, content: str) -> dict[str, Any]:
+        """在工作区中创建新的 UTF-8 文本文件，不覆盖已有路径。"""
+        target = resolve_workspace_path(self.workspace_root, path)
+        if target.exists():
+            raise ToolError(
+                "FileAlreadyExists",
+                f"File '{path}' already exists. Use edit_file to modify existing files.",
+            )
+        if not target.parent.exists() or not target.parent.is_dir():
+            raise ToolError(
+                "ParentDirectoryNotFound",
+                f"Parent directory for '{path}' does not exist.",
+            )
+
+        encoded_content = content.encode("utf-8")
+        if len(encoded_content) > MAX_FILE_BYTES:
+            raise ToolError(
+                "FileTooLarge",
+                f"Content for '{path}' exceeds the {MAX_FILE_BYTES}-byte limit.",
+            )
+
+        try:
+            with target.open("x", encoding="utf-8", newline="") as file:
+                file.write(content)
+        except FileExistsError:
+            raise ToolError(
+                "FileAlreadyExists",
+                f"File '{path}' already exists. Use edit_file to modify existing files.",
+            ) from None
+
+        return {
+            "path": self._relative_path(target),
+            "created": True,
+            "bytes_written": len(encoded_content),
+        }
+
+    def edit_file(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+    ) -> dict[str, Any]:
+        """用唯一匹配的旧文本替换现有 UTF-8 文件中的一个片段。"""
+        if not old_text:
+            raise ToolError("InvalidArguments", "old_text must not be empty.")
+        if old_text == new_text:
+            raise ToolError("NoChange", "old_text and new_text are identical.")
+
+        target = resolve_workspace_path(self.workspace_root, path)
+        if not target.exists():
+            raise ToolError("FileNotFound", f"File '{path}' does not exist.")
+        if not target.is_file():
+            raise ToolError("NotFile", f"Path '{path}' is not a file.")
+        if target.stat().st_size > MAX_FILE_BYTES:
+            raise ToolError(
+                "FileTooLarge",
+                f"File '{path}' exceeds the {MAX_FILE_BYTES}-byte limit.",
+            )
+
+        try:
+            content = target.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            raise ToolError(
+                "UnsupportedFileEncoding",
+                "The file is not valid UTF-8 text.",
+            ) from None
+
+        occurrences = content.count(old_text)
+        if occurrences == 0:
+            raise ToolError(
+                "TextNotFound",
+                "The specified old_text was not found in the file.",
+            )
+        if occurrences > 1:
+            raise ToolError(
+                "AmbiguousEdit",
+                "The specified old_text occurs multiple times. "
+                "Provide a larger unique context.",
+            )
+
+        updated_content = content.replace(old_text, new_text, 1)
+        encoded_content = updated_content.encode("utf-8")
+        if len(encoded_content) > MAX_FILE_BYTES:
+            raise ToolError(
+                "FileTooLarge",
+                f"Edited file '{path}' would exceed the {MAX_FILE_BYTES}-byte limit.",
+            )
+        target.write_bytes(encoded_content)
+        return {
+            "path": self._relative_path(target),
+            "modified": True,
+            "replacements": 1,
+        }
 
     def _iter_search_files(self, target: Path) -> Iterator[Path]:
         """稳定地产生可搜索文件，并跳过明显的大型目录。"""

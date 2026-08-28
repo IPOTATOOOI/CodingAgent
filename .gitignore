@@ -30,4 +30,7 @@ Thumbs.db
 # 其他
 推免考核题目学生版.pdf
 stage_plan.md
-examples/
+examples/*
+!examples/demo_project/
+examples/demo_project/*
+!examples/demo_project/calculator.py

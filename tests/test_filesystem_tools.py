@@ -169,6 +169,113 @@ class FilesystemToolsTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.error, "PathOutsideWorkspace")
 
+    def test_write_file_creates_utf8_file(self) -> None:
+        result = self.tools.write_file("hello.py", "print('你好')\n")
+
+        self.assertEqual(
+            result,
+            {
+                "path": "hello.py",
+                "created": True,
+                "bytes_written": len("print('你好')\n".encode("utf-8")),
+            },
+        )
+        self.assertEqual(
+            (self.workspace / "hello.py").read_text(encoding="utf-8"),
+            "print('你好')\n",
+        )
+
+    def test_write_file_refuses_existing_file_without_changing_it(self) -> None:
+        original = (self.workspace / "README.md").read_bytes()
+
+        with self.assertRaises(ToolError) as raised:
+            self.tools.write_file("README.md", "replacement")
+
+        self.assertEqual(raised.exception.error, "FileAlreadyExists")
+        self.assertEqual((self.workspace / "README.md").read_bytes(), original)
+
+    def test_write_file_rejects_traversal_and_missing_parent(self) -> None:
+        cases = [
+            ("../outside.py", "PathOutsideWorkspace"),
+            ("missing/child.py", "ParentDirectoryNotFound"),
+        ]
+
+        for path, expected_error in cases:
+            with self.subTest(path=path), self.assertRaises(ToolError) as raised:
+                self.tools.write_file(path, "content")
+            self.assertEqual(raised.exception.error, expected_error)
+
+    def test_edit_file_replaces_one_unique_utf8_block(self) -> None:
+        target = self.workspace / "src" / "greeting.py"
+        target.write_bytes("def greeting():\r\n    return '你好'\r\n".encode("utf-8"))
+
+        result = self.tools.edit_file(
+            "src/greeting.py",
+            "return '你好'",
+            "return '你好，世界'",
+        )
+
+        self.assertEqual(
+            result,
+            {"path": "src/greeting.py", "modified": True, "replacements": 1},
+        )
+        self.assertEqual(
+            target.read_bytes(),
+            "def greeting():\r\n    return '你好，世界'\r\n".encode("utf-8"),
+        )
+
+    def test_edit_file_rejects_missing_and_ambiguous_text_without_changes(self) -> None:
+        target = self.workspace / "values.txt"
+        target.write_text("same\nsame\n", encoding="utf-8")
+
+        for old_text, expected_error in [
+            ("missing", "TextNotFound"),
+            ("same", "AmbiguousEdit"),
+        ]:
+            with self.subTest(old_text=old_text), self.assertRaises(
+                ToolError
+            ) as raised:
+                self.tools.edit_file("values.txt", old_text, "changed")
+            self.assertEqual(raised.exception.error, expected_error)
+            self.assertEqual(target.read_text(encoding="utf-8"), "same\nsame\n")
+
+    def test_edit_file_rejects_empty_or_identical_text(self) -> None:
+        for old_text, new_text, expected_error in [
+            ("", "new", "InvalidArguments"),
+            ("same", "same", "NoChange"),
+        ]:
+            with self.subTest(expected_error=expected_error), self.assertRaises(
+                ToolError
+            ) as raised:
+                self.tools.edit_file("README.md", old_text, new_text)
+            self.assertEqual(raised.exception.error, expected_error)
+
+    def test_edit_file_rejects_invalid_targets_and_traversal(self) -> None:
+        cases = [
+            ("missing.txt", "FileNotFound"),
+            ("src", "NotFile"),
+            ("../outside.txt", "PathOutsideWorkspace"),
+        ]
+
+        for path, expected_error in cases:
+            with self.subTest(path=path), self.assertRaises(ToolError) as raised:
+                self.tools.edit_file(path, "old", "new")
+            self.assertEqual(raised.exception.error, expected_error)
+
+    def test_edit_file_rejects_large_and_binary_files(self) -> None:
+        (self.workspace / "large-edit.txt").write_bytes(
+            b"x" * (MAX_FILE_BYTES + 1)
+        )
+        (self.workspace / "binary-edit.bin").write_bytes(b"\xff\xfe")
+
+        with self.assertRaises(ToolError) as large_error:
+            self.tools.edit_file("large-edit.txt", "x", "y")
+        with self.assertRaises(ToolError) as binary_error:
+            self.tools.edit_file("binary-edit.bin", "old", "new")
+
+        self.assertEqual(large_error.exception.error, "FileTooLarge")
+        self.assertEqual(binary_error.exception.error, "UnsupportedFileEncoding")
+
 
 if __name__ == "__main__":
     unittest.main()

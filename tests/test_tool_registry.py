@@ -17,12 +17,18 @@ class ToolRegistryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def test_three_tools_are_registered_with_schemas(self) -> None:
+    def test_five_tools_are_registered_with_schemas(self) -> None:
         self.assertEqual(
             self.registry.names,
-            ("list_directory", "read_file", "search_text"),
+            (
+                "list_directory",
+                "read_file",
+                "search_text",
+                "write_file",
+                "edit_file",
+            ),
         )
-        self.assertEqual(len(self.registry.schemas), 3)
+        self.assertEqual(len(self.registry.schemas), 5)
         self.assertEqual(
             [schema["function"]["name"] for schema in self.registry.schemas],
             list(self.registry.names),
@@ -55,6 +61,15 @@ class ToolRegistryTests(unittest.TestCase):
         result = self.registry.execute("search_text", '{"query":3}')
 
         self.assertEqual(result["error"], "InvalidArguments")
+
+    def test_mutation_error_is_returned_as_structured_result(self) -> None:
+        result = self.registry.execute(
+            "write_file",
+            '{"path":"README.md","content":"replacement"}',
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "FileAlreadyExists")
 
 
 if __name__ == "__main__":

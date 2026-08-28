@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 2: Read-only local tools.
+Stage 3: Workspace-scoped file editing.
 
 The project currently supports:
 
@@ -16,12 +16,15 @@ The project currently supports:
 - Workspace-scoped directory listing
 - Workspace-scoped UTF-8 text file reading
 - Literal text search
+- Create-only UTF-8 text file writing
+- Exact, unique text replacement in existing files
 - Structured local tool execution
+- At most two explicit tool-call rounds per user turn
 
 It does not yet support:
 
-- File modification
 - Command execution
+- Running, compiling, or testing code
 - Autonomous multi-step agent loops
 - Context compaction
 
@@ -67,29 +70,43 @@ or:
 coding-agent --workspace .
 ```
 
-The workspace defines the root directory that the read-only tools may inspect.
+The workspace defines the root directory that the file tools may inspect or modify.
 Canonical paths outside this root are rejected. This is basic workspace-boundary
 enforcement, not a complete security sandbox. Secret-bearing `.env` variants are
 excluded from file reading and text search; `.env.example` remains inspectable.
+
+`write_file` creates new files only and refuses to overwrite existing paths.
+`edit_file` changes an existing UTF-8 text file only when `old_text` occurs exactly
+once. Neither tool creates missing directories. Files larger than 1 MiB are rejected.
 
 Example session:
 
 ```text
 Mini Coding Agent
-Stage 2 - Read-only tools
+Stage 3 - File editing tools
 
 Workspace: /path/to/project
 
 Type your message.
 Type /exit to quit.
 
-> Read README.md and summarize it.
-[tool] read_file(path='README.md')
+> Inspect calculator.py and add proper handling for division by zero.
+[tool] read_file(path='calculator.py')
+[tool] edit_file(path='calculator.py')
 Assistant:
-<assistant response based on the file content>
+<assistant response describing the change and stating that tests were not run>
 > /exit
 Exiting Mini Coding Agent.
 ```
+
+You can try this flow without touching the agent's own source tree:
+
+```bash
+python -m coding_agent --workspace examples/demo_project
+```
+
+Stage 3 can inspect and modify the demo file, but it cannot execute the file or run
+tests. A successful edit means the text was written; it does not verify correctness.
 
 ## Development Stages
 

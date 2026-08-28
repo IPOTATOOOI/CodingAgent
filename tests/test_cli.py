@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 from coding_agent.cli import (
+    SYSTEM_PROMPT,
     ToolResolutionLimitError,
+    _format_tool_trace,
     _safe_print,
     main,
     resolve_user_turn,
@@ -120,7 +122,60 @@ class CliTests(unittest.TestCase):
             ["system", "user", "assistant", "tool", "tool", "assistant"],
         )
 
-    def test_second_tool_round_is_rejected_without_third_request(self) -> None:
+    def test_two_tool_rounds_can_inspect_then_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / "calculator.py"
+            target.write_text(
+                "def divide(a, b):\n    return a / b\n", encoding="utf-8"
+            )
+            registry = create_tool_registry(workspace)
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [ToolCall("call-1", "read_file", '{"path":"calculator.py"}')],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-2",
+                            "edit_file",
+                            json.dumps(
+                                {
+                                    "path": "calculator.py",
+                                    "old_text": "    return a / b",
+                                    "new_text": (
+                                        "    if b == 0:\n"
+                                        "        raise ValueError('division by zero')\n"
+                                        "    return a / b"
+                                    ),
+                                }
+                            ),
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    "I added division-by-zero handling. I did not run tests.", []
+                ),
+            ]
+            conversation = Conversation("System prompt")
+            conversation.add_user_message("Handle division by zero")
+
+            with patch("sys.stdout", io.StringIO()):
+                result = resolve_user_turn(client, conversation, registry)
+
+            self.assertIn("if b == 0", target.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, "I added division-by-zero handling. I did not run tests.")
+        self.assertEqual(client.complete.call_count, 3)
+        self.assertEqual(
+            [message["role"] for message in conversation.messages],
+            ["system", "user", "assistant", "tool", "assistant", "tool", "assistant"],
+        )
+
+    def test_third_tool_response_is_rejected_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             (workspace / "README.md").write_text("text", encoding="utf-8")
@@ -135,6 +190,16 @@ class CliTests(unittest.TestCase):
                     None,
                     [ToolCall("call-2", "search_text", '{"query":"text"}')],
                 ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-3",
+                            "write_file",
+                            '{"path":"forbidden.txt","content":"no"}',
+                        )
+                    ],
+                ),
             ]
             conversation = Conversation("System prompt")
             conversation.add_user_message("Inspect")
@@ -144,8 +209,37 @@ class CliTests(unittest.TestCase):
             ):
                 resolve_user_turn(client, conversation, registry)
 
-        self.assertEqual(client.complete.call_count, 2)
+            self.assertFalse((workspace / "forbidden.txt").exists())
+
+        self.assertEqual(client.complete.call_count, 3)
         self.assertEqual(conversation.messages[-1]["role"], "assistant")
+
+    def test_mutation_trace_only_displays_path(self) -> None:
+        trace = _format_tool_trace(
+            ToolCall(
+                "call-1",
+                "edit_file",
+                '{"path":"app.py","old_text":"secret-old","new_text":"secret-new"}',
+            )
+        )
+        write_trace = _format_tool_trace(
+            ToolCall(
+                "call-2",
+                "write_file",
+                '{"path":"new.py","content":"secret-content"}',
+            )
+        )
+
+        self.assertEqual(trace, "[tool] edit_file(path='app.py')")
+        self.assertEqual(write_trace, "[tool] write_file(path='new.py')")
+
+    def test_system_prompt_describes_editing_without_execution(self) -> None:
+        lowered = SYSTEM_PROMPT.lower()
+
+        self.assertNotIn("read-only access", lowered)
+        self.assertIn("edit existing text files", lowered)
+        self.assertIn("does not allow command execution", lowered)
+        self.assertIn("never claim", lowered)
 
     def test_empty_input_does_not_call_llm(self) -> None:
         client = Mock()
