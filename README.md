@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 4: Local command execution.
+Stage 5: Autonomous agent loop.
 
 The project currently supports:
 
@@ -22,12 +22,17 @@ The project currently supports:
 - Separate stdout, stderr, exit-code, and timeout feedback
 - Bounded command output returned to the model
 - Structured local tool execution
-- At most three explicit tool-call rounds per user turn
+- A general observation-action loop driven by model decisions
+- Configurable per-task step limits
+- Recovery from structured tool errors and unsuccessful command exits
+- At most eight sequential tool calls in one model response
 
 It does not yet support:
 
-- Unrestricted autonomous repair loops
 - Context compaction
+- Repeated-action and no-progress detection
+- Automatic retries for transient LLM failures
+- Mandatory post-edit verification
 - Persistent or interactive shell sessions
 - Background processes
 - OS-level execution sandboxing
@@ -65,14 +70,18 @@ The `.env` file is ignored by Git and must never be committed.
 ## Run
 
 ```bash
-python -m coding_agent --workspace .
+python -m coding_agent --workspace . --max-steps 12
 ```
 
 or:
 
 ```bash
-coding-agent --workspace .
+coding-agent --workspace . --max-steps 12
 ```
+
+`--max-steps` limits the number of LLM responses in one user task. Its default is
+12 and its accepted range is 1 through 50. Reaching the limit stops immediately
+without making an additional LLM request.
 
 The workspace defines the root directory that the file tools may inspect or modify.
 Canonical paths outside this root are rejected. This is basic workspace-boundary
@@ -93,21 +102,48 @@ This is shell-free local command execution with workspace-scoped working directo
 and execution limits. It is not an OS-level sandbox: child processes still run with
 the permissions of the current operating-system user.
 
+## Agent Loop
+
+One LLM response is one Agent Step. A response may request one or more tools; all
+calls in that response execute sequentially and still count as one step. Their
+structured results are appended to the conversation before the next model decision.
+
+```text
+User task
+   ↓
+LLM decision  ─────────────→ final text → completed
+   ↓ tool calls
+Local runtime
+   ↓ observations
+Conversation
+   └───────────────────────→ next LLM decision
+```
+
+Tool failures do not automatically stop the loop. For example, `FileNotFound` can
+lead the model to list the directory and retry with the correct path. Likewise,
+`pytest` returning exit code 1 is a successful command observation, so the model can
+inspect the failure, edit code, and run the tests again.
+
 Example session:
 
 ```text
 Mini Coding Agent
-Stage 4 - Local command execution
+Stage 5 - Autonomous agent loop
 
 Workspace: /path/to/project
+Max steps per task: 12
 
 Type your message.
 Type /exit to quit.
 
 > Inspect calculator.py, fix the implementation bug, and run the tests.
-[tool] read_file(path='calculator.py')
-[tool] edit_file(path='calculator.py')
-[tool] run_command(command=['python', '-m', 'pytest', '-q'], cwd='.')
+[step 1] [tool] run_command(command=['python', '-m', 'unittest', '-v'], cwd='.')
+[result] exit_code=1, stdout=0 chars, stderr=624 chars
+[step 2] [tool] read_file(path='calculator.py')
+[result] lines=1-2, total=2
+[step 3] [tool] edit_file(path='calculator.py')
+[result] modified=calculator.py
+[step 4] [tool] run_command(command=['python', '-m', 'unittest', '-v'], cwd='.')
 [result] exit_code=0, stdout=20 chars, stderr=0 chars
 Assistant:
 <assistant response grounded in the real command result>
@@ -118,13 +154,17 @@ Exiting Mini Coding Agent.
 You can try this flow without touching the agent's own source tree:
 
 ```bash
-python -m coding_agent --workspace examples/demo_project
+python -m coding_agent --workspace examples/demo_project --max-steps 12
 ```
 
-Stage 4 can inspect, modify, and execute the demo project. A non-zero process exit
-code remains a successful tool invocation: it means the command ran and the target
-program reported failure. After three tool rounds the Agent reports any remaining
-problem instead of starting an unrestricted repair loop.
+Stage 5 can use a failed execution result to choose further inspection, editing, and
+execution actions until the model returns final text or a Runtime bound stops the
+task. It does not hard-code a `run -> read -> edit -> run` workflow; the model selects
+the next tool from the accumulated conversation.
+
+Possible `AgentResult.stop_reason` values are `completed`, `max_steps`,
+`interrupted`, `invalid_response`, and `llm_error`. A response containing more than
+eight tool calls is treated as an invalid response and none of those calls execute.
 
 ## Development Stages
 

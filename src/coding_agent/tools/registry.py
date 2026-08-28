@@ -147,7 +147,7 @@ class ToolRegistry:
 
 
 def create_tool_registry(workspace_root: Path) -> ToolRegistry:
-    """为指定工作区创建 Stage 4 的六个本地工具。"""
+    """为指定工作区创建六个本地工具。"""
     filesystem = FilesystemTools(workspace_root)
     commands = CommandTools(workspace_root)
     registry = ToolRegistry()

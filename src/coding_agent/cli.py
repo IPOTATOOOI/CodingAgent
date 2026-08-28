@@ -1,4 +1,4 @@
-"""第四阶段文件操作与本地执行对话的命令行界面。"""
+"""自主 Coding Agent 的命令行界面。"""
 
 import argparse
 import json
@@ -6,83 +6,45 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from coding_agent.agent import (
+    Agent,
+    AgentResult,
+    DEFAULT_MAX_STEPS,
+    MAX_MAX_STEPS,
+    MIN_MAX_STEPS,
+)
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
-from coding_agent.llm import LLMClient, LLMError, LLMResponse, ToolCall
+from coding_agent.llm import LLMClient, ToolCall
 from coding_agent.tools.registry import ToolRegistry, create_tool_registry
 
 
-SYSTEM_PROMPT = """You are Mini Coding Agent, a programming assistant with access to the current workspace.
-You may inspect project files, search text, create and edit UTF-8 text files, and execute non-interactive development commands using the provided tools.
+SYSTEM_PROMPT = """You are Mini Coding Agent, an autonomous programming assistant with access to the current workspace.
+Use the available tools to inspect the project, search text, create or edit UTF-8 files, and run non-interactive development commands.
+Work iteratively: observe tool results, decide the next useful action, and continue until you can answer the user's request or a runtime limit stops the task.
+Choose actions dynamically from the current conversation instead of following a fixed read-edit-run workflow.
 Before modifying an existing file, inspect the relevant code first.
 Use edit_file for existing files and write_file only for new files.
-Use run_command when actual execution feedback is necessary, especially for tests, scripts, compilers, and builds.
 Do not use shell operators, install packages, start interactive programs, or start background processes.
 Never claim that you inspected a local file unless you actually obtained its content through a tool.
 Never claim tests passed unless run_command actually produced evidence that they passed.
 A successful file edit does not imply that the code is correct.
-If execution reveals that additional repair is needed after the tool-round limit, explain the remaining issue instead of claiming success."""
-
-
-class ToolResolutionLimitError(RuntimeError):
-    """模型在第四次请求中再次调用工具时抛出的限制异常。"""
-
-
-def resolve_user_turn(
-    client: LLMClient,
-    conversation: Conversation,
-    registry: ToolRegistry,
-) -> str:
-    """完成一次用户回合，最多解析三轮明确受限的工具调用。"""
-    first_response = client.complete(conversation.messages, tools=registry.schemas)
-    if not first_response.tool_calls:
-        content = _require_content(first_response)
-        conversation.add_assistant_message(content)
-        return content
-
-    _resolve_tool_calls(first_response, conversation, registry)
-
-    second_response = client.complete(conversation.messages, tools=registry.schemas)
-    if not second_response.tool_calls:
-        content = _require_content(second_response)
-        conversation.add_assistant_message(content)
-        return content
-
-    _resolve_tool_calls(second_response, conversation, registry)
-
-    third_response = client.complete(conversation.messages, tools=registry.schemas)
-    if not third_response.tool_calls:
-        content = _require_content(third_response)
-        conversation.add_assistant_message(content)
-        return content
-
-    _resolve_tool_calls(third_response, conversation, registry)
-
-    final_response = client.complete(conversation.messages, tools=registry.schemas)
-    if final_response.tool_calls:
-        message = (
-            "Stage 4 tool round limit reached. The execution result may require "
-            "additional work, but Stage 4 does not support iterative autonomous repair."
-        )
-        conversation.add_assistant_message(message)
-        raise ToolResolutionLimitError(message)
-
-    content = _require_content(final_response)
-    conversation.add_assistant_message(content)
-    return content
+If a tool fails or a command exits unsuccessfully, treat the result as an observation and decide whether another action can make progress."""
 
 
 def run_cli(
     client: LLMClient | None = None,
     workspace_root: Path | None = None,
     registry: ToolRegistry | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
 ) -> None:
-    """运行带工作区文件操作与本地执行能力的多轮对话。"""
+    """运行具有自主工具循环的多轮命令行对话。"""
     workspace = (workspace_root or Path.cwd()).resolve()
     print("Mini Coding Agent")
-    print("Stage 4 - Local command execution")
+    print("Stage 5 - Autonomous agent loop")
     print()
     _safe_print(f"Workspace: {workspace}")
+    _safe_print(f"Max steps per task: {max_steps}")
     print()
     print("Type your message.")
     print("Type /exit to quit.")
@@ -97,6 +59,14 @@ def run_cli(
 
     conversation = Conversation(SYSTEM_PROMPT)
     tool_registry = registry or create_tool_registry(workspace)
+    agent = Agent(
+        llm_client=client,
+        conversation=conversation,
+        tool_registry=tool_registry,
+        max_steps=max_steps,
+        on_tool_call=_print_tool_call,
+        on_tool_result=_print_tool_result,
+    )
 
     while True:
         try:
@@ -112,27 +82,26 @@ def run_cli(
         if not user_input:
             continue
 
-        conversation.add_user_message(user_input)
-        try:
-            response = resolve_user_turn(client, conversation, tool_registry)
-        except LLMError as error:
-            print(f"LLM request failed: {error}")
-            continue
-        except ToolResolutionLimitError as error:
-            print(f"Tool resolution limit: {error}")
-            continue
-
-        print("Assistant:")
-        _safe_print(response)
+        result = agent.run(user_input)
+        _print_agent_result(result)
 
 
 def main(argv: list[str] | None = None) -> None:
-    """启动命令行界面。"""
+    """解析参数并启动命令行界面。"""
     parser = argparse.ArgumentParser(description="Mini Coding Agent")
     parser.add_argument(
         "--workspace",
         default=".",
-        help="workspace root available to file tools (default: current directory)",
+        help="workspace root available to local tools (default: current directory)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_MAX_STEPS,
+        help=(
+            "maximum LLM decision steps per task "
+            f"(default: {DEFAULT_MAX_STEPS}, range: {MIN_MAX_STEPS}-{MAX_MAX_STEPS})"
+        ),
     )
     arguments = parser.parse_args(argv)
     workspace = Path(arguments.workspace).resolve()
@@ -140,33 +109,41 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(f"workspace does not exist: {workspace}")
     if not workspace.is_dir():
         parser.error(f"workspace is not a directory: {workspace}")
-    run_cli(workspace_root=workspace)
-
-
-def _require_content(response: LLMResponse) -> str:
-    """从无工具调用的响应中取得必要文本。"""
-    if response.content is None:
-        raise LLMError("the model returned no text.")
-    return response.content
-
-
-def _resolve_tool_calls(
-    response: LLMResponse,
-    conversation: Conversation,
-    registry: ToolRegistry,
-) -> None:
-    """按顺序执行一个模型响应中的全部工具调用。"""
-    conversation.add_assistant_tool_calls(response.content, response.tool_calls)
-    for tool_call in response.tool_calls:
-        _safe_print(_format_tool_trace(tool_call))
-        result = registry.execute(tool_call.name, tool_call.arguments)
-        conversation.add_tool_result(
-            tool_call.id,
-            json.dumps(result, ensure_ascii=False),
+    if not MIN_MAX_STEPS <= arguments.max_steps <= MAX_MAX_STEPS:
+        parser.error(
+            f"max-steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}"
         )
-        result_trace = _format_tool_result_trace(tool_call, result)
-        if result_trace is not None:
-            _safe_print(result_trace)
+    run_cli(workspace_root=workspace, max_steps=arguments.max_steps)
+
+
+def _print_tool_call(step_number: int, tool_call: ToolCall) -> None:
+    """输出不包含敏感参数内容的工具调用摘要。"""
+    _safe_print(f"[step {step_number}] {_format_tool_trace(tool_call)}")
+
+
+def _print_tool_result(
+    step_number: int,
+    tool_call: ToolCall,
+    result: dict[str, Any],
+) -> None:
+    """输出工具结果摘要，不展示完整文件或命令输出。"""
+    del step_number
+    _safe_print(_format_tool_result_trace(tool_call, result))
+
+
+def _print_agent_result(result: AgentResult) -> None:
+    """根据任务停止原因输出最终文本。"""
+    if result.stop_reason == "completed":
+        print("Assistant:")
+    elif result.stop_reason == "max_steps":
+        print("Agent stopped: maximum step limit reached.")
+    elif result.stop_reason == "interrupted":
+        print("Agent interrupted by user.")
+    elif result.stop_reason == "llm_error":
+        print("Agent stopped: LLM request failed.")
+    else:
+        print("Agent stopped: invalid model response.")
+    _safe_print(result.content)
 
 
 def _format_tool_trace(tool_call: ToolCall) -> str:
@@ -190,8 +167,7 @@ def _format_tool_trace(tool_call: ToolCall) -> str:
     for name in visible_names:
         if name not in arguments:
             continue
-        value = arguments[name]
-        displayed = repr(value)
+        displayed = repr(arguments[name])
         if len(displayed) > 80:
             displayed = f"{displayed[:77]}..."
         parts.append(f"{name}={displayed}")
@@ -199,26 +175,40 @@ def _format_tool_trace(tool_call: ToolCall) -> str:
 
 
 def _format_tool_result_trace(
-    tool_call: ToolCall, result: dict[str, Any]
-) -> str | None:
-    """为命令工具构造不包含完整输出的结果摘要。"""
-    if tool_call.name != "run_command":
-        return None
+    tool_call: ToolCall,
+    result: dict[str, Any],
+) -> str:
+    """构造不包含完整工具输出的结果摘要。"""
     if not result.get("success"):
         return f"[result] error={result.get('error', 'ToolExecutionError')}"
 
     data = result.get("data", {})
-    stdout_length = len(data.get("stdout", ""))
-    stderr_length = len(data.get("stderr", ""))
-    if data.get("timed_out"):
+    if tool_call.name == "run_command":
+        stdout_length = len(data.get("stdout", ""))
+        stderr_length = len(data.get("stderr", ""))
+        if data.get("timed_out"):
+            return (
+                "[result] timed_out=true, "
+                f"stdout={stdout_length} chars, stderr={stderr_length} chars"
+            )
         return (
-            "[result] timed_out=true, "
+            f"[result] exit_code={data.get('exit_code')}, "
             f"stdout={stdout_length} chars, stderr={stderr_length} chars"
         )
-    return (
-        f"[result] exit_code={data.get('exit_code')}, "
-        f"stdout={stdout_length} chars, stderr={stderr_length} chars"
-    )
+    if tool_call.name == "list_directory":
+        return f"[result] entries={len(data.get('entries', []))}"
+    if tool_call.name == "read_file":
+        return (
+            f"[result] lines={data.get('start_line')}-{data.get('end_line')}, "
+            f"total={data.get('total_lines')}"
+        )
+    if tool_call.name == "search_text":
+        return f"[result] matches={len(data.get('matches', []))}"
+    if tool_call.name == "write_file":
+        return f"[result] created={data.get('path')}"
+    if tool_call.name == "edit_file":
+        return f"[result] modified={data.get('path')}"
+    return "[result] success=true"
 
 
 def _safe_print(text: str) -> None:

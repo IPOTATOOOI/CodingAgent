@@ -1,26 +1,19 @@
-"""第四阶段命令行编排、执行反馈与工具解析测试。"""
+"""第五阶段命令行参数、轨迹和 Agent 委托测试。"""
 
 import io
-import json
 from pathlib import Path
-import sys
-import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from coding_agent.cli import (
     SYSTEM_PROMPT,
-    ToolResolutionLimitError,
-    _format_tool_trace,
     _format_tool_result_trace,
+    _format_tool_trace,
     _safe_print,
     main,
-    resolve_user_turn,
     run_cli,
 )
-from coding_agent.conversation import Conversation
 from coding_agent.llm import LLMError, LLMResponse, ToolCall
-from coding_agent.tools.registry import create_tool_registry
 
 
 class CliTests(unittest.TestCase):
@@ -64,249 +57,34 @@ class CliTests(unittest.TestCase):
         )
         self.assertIn("Mock answer 2", output.getvalue())
 
-    def test_complete_tool_resolution_chain(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            (workspace / "README.md").write_text(
-                "Mini Coding Agent", encoding="utf-8"
-            )
-            registry = create_tool_registry(workspace)
-            client = Mock()
-            client.complete.side_effect = [
-                LLMResponse(
-                    None,
-                    [ToolCall("call-1", "read_file", '{"path":"README.md"}')],
-                ),
-                LLMResponse("The README describes Mini Coding Agent.", []),
-            ]
-            conversation = Conversation("System prompt")
-            conversation.add_user_message("Summarize README")
+    def test_cli_delegates_repeated_tool_decisions_to_agent(self) -> None:
+        client = Mock()
+        client.complete.side_effect = [
+            LLMResponse(
+                None,
+                [ToolCall("call-1", "list_directory", '{"path":"."}')],
+            ),
+            LLMResponse(
+                None,
+                [ToolCall("call-2", "read_file", '{"path":"README.md"}')],
+            ),
+            LLMResponse("README inspected.", []),
+        ]
+        output = io.StringIO()
 
-            with patch("sys.stdout", io.StringIO()):
-                result = resolve_user_turn(client, conversation, registry)
+        with patch("builtins.input", side_effect=["Inspect README", "/exit"]), patch(
+            "sys.stdout", output
+        ):
+            run_cli(client=client, workspace_root=Path.cwd())
 
-        self.assertEqual(result, "The README describes Mini Coding Agent.")
-        self.assertEqual(client.complete.call_count, 2)
-        second_messages = client.complete.call_args_list[1].args[0]
-        self.assertEqual(
-            [message["role"] for message in second_messages],
-            ["system", "user", "assistant", "tool"],
-        )
-        tool_result = json.loads(second_messages[-1]["content"])
-        self.assertTrue(tool_result["success"])
-        self.assertIn("Mini Coding Agent", tool_result["data"]["content"])
-
-    def test_multiple_tool_calls_are_all_resolved(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            (workspace / "one.txt").write_text("one", encoding="utf-8")
-            (workspace / "two.txt").write_text("two", encoding="utf-8")
-            registry = create_tool_registry(workspace)
-            client = Mock()
-            client.complete.side_effect = [
-                LLMResponse(
-                    None,
-                    [
-                        ToolCall("call-1", "read_file", '{"path":"one.txt"}'),
-                        ToolCall("call-2", "read_file", '{"path":"two.txt"}'),
-                    ],
-                ),
-                LLMResponse("Both files were read.", []),
-            ]
-            conversation = Conversation("System prompt")
-            conversation.add_user_message("Read both")
-
-            with patch("sys.stdout", io.StringIO()):
-                resolve_user_turn(client, conversation, registry)
-
-        self.assertEqual(
-            [message["role"] for message in conversation.messages],
-            ["system", "user", "assistant", "tool", "tool", "assistant"],
-        )
-
-    def test_two_tool_rounds_can_inspect_then_edit(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            target = workspace / "calculator.py"
-            target.write_text(
-                "def divide(a, b):\n    return a / b\n", encoding="utf-8"
-            )
-            registry = create_tool_registry(workspace)
-            client = Mock()
-            client.complete.side_effect = [
-                LLMResponse(
-                    None,
-                    [ToolCall("call-1", "read_file", '{"path":"calculator.py"}')],
-                ),
-                LLMResponse(
-                    None,
-                    [
-                        ToolCall(
-                            "call-2",
-                            "edit_file",
-                            json.dumps(
-                                {
-                                    "path": "calculator.py",
-                                    "old_text": "    return a / b",
-                                    "new_text": (
-                                        "    if b == 0:\n"
-                                        "        raise ValueError('division by zero')\n"
-                                        "    return a / b"
-                                    ),
-                                }
-                            ),
-                        )
-                    ],
-                ),
-                LLMResponse(
-                    "I added division-by-zero handling. I did not run tests.", []
-                ),
-            ]
-            conversation = Conversation("System prompt")
-            conversation.add_user_message("Handle division by zero")
-
-            with patch("sys.stdout", io.StringIO()):
-                result = resolve_user_turn(client, conversation, registry)
-
-            self.assertIn("if b == 0", target.read_text(encoding="utf-8"))
-
-        self.assertEqual(result, "I added division-by-zero handling. I did not run tests.")
+        displayed = output.getvalue()
         self.assertEqual(client.complete.call_count, 3)
-        self.assertEqual(
-            [message["role"] for message in conversation.messages],
-            ["system", "user", "assistant", "tool", "assistant", "tool", "assistant"],
-        )
-
-    def test_fourth_tool_response_is_rejected_without_execution(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            (workspace / "README.md").write_text("text", encoding="utf-8")
-            registry = create_tool_registry(workspace)
-            client = Mock()
-            client.complete.side_effect = [
-                LLMResponse(
-                    None,
-                    [ToolCall("call-1", "read_file", '{"path":"README.md"}')],
-                ),
-                LLMResponse(
-                    None,
-                    [ToolCall("call-2", "search_text", '{"query":"text"}')],
-                ),
-                LLMResponse(
-                    None,
-                    [
-                        ToolCall(
-                            "call-3", "read_file", '{"path":"README.md"}'
-                        )
-                    ],
-                ),
-                LLMResponse(
-                    None,
-                    [
-                        ToolCall(
-                            "call-4",
-                            "write_file",
-                            '{"path":"forbidden.txt","content":"no"}',
-                        )
-                    ],
-                ),
-            ]
-            conversation = Conversation("System prompt")
-            conversation.add_user_message("Inspect")
-
-            with patch("sys.stdout", io.StringIO()), self.assertRaises(
-                ToolResolutionLimitError
-            ):
-                resolve_user_turn(client, conversation, registry)
-
-            self.assertFalse((workspace / "forbidden.txt").exists())
-
-        self.assertEqual(client.complete.call_count, 4)
-        self.assertEqual(conversation.messages[-1]["role"], "assistant")
-
-    def test_three_tool_rounds_can_inspect_edit_and_execute(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            target = workspace / "calculator.py"
-            target.write_text(
-                "def add(a, b):\n    return a - b\n", encoding="utf-8"
-            )
-            registry = create_tool_registry(workspace)
-            client = Mock()
-            client.complete.side_effect = [
-                LLMResponse(
-                    None,
-                    [ToolCall("call-1", "read_file", '{"path":"calculator.py"}')],
-                ),
-                LLMResponse(
-                    None,
-                    [
-                        ToolCall(
-                            "call-2",
-                            "edit_file",
-                            json.dumps(
-                                {
-                                    "path": "calculator.py",
-                                    "old_text": "return a - b",
-                                    "new_text": "return a + b",
-                                }
-                            ),
-                        )
-                    ],
-                ),
-                LLMResponse(
-                    None,
-                    [
-                        ToolCall(
-                            "call-3",
-                            "run_command",
-                            json.dumps(
-                                {
-                                    "command": [
-                                        sys.executable,
-                                        "-c",
-                                        (
-                                            "from calculator import add; "
-                                            "raise SystemExit(0 if add(2, 3) == 5 else 1)"
-                                        ),
-                                    ],
-                                    "cwd": ".",
-                                    "timeout_seconds": 30,
-                                }
-                            ),
-                        )
-                    ],
-                ),
-                LLMResponse("I fixed add() and execution succeeded.", []),
-            ]
-            conversation = Conversation("System prompt")
-            conversation.add_user_message("Fix add and verify it")
-
-            with patch("sys.stdout", io.StringIO()):
-                result = resolve_user_turn(client, conversation, registry)
-
-        self.assertEqual(result, "I fixed add() and execution succeeded.")
-        self.assertEqual(client.complete.call_count, 4)
-        self.assertEqual(
-            [message["role"] for message in conversation.messages],
-            [
-                "system",
-                "user",
-                "assistant",
-                "tool",
-                "assistant",
-                "tool",
-                "assistant",
-                "tool",
-                "assistant",
-            ],
-        )
-        execution_result = json.loads(conversation.messages[-2]["content"])
-        self.assertTrue(execution_result["success"])
-        self.assertEqual(execution_result["data"]["exit_code"], 0)
+        self.assertIn("[step 1] [tool] list_directory", displayed)
+        self.assertIn("[step 2] [tool] read_file", displayed)
+        self.assertIn("README inspected.", displayed)
 
     def test_mutation_trace_only_displays_path(self) -> None:
-        trace = _format_tool_trace(
+        edit_trace = _format_tool_trace(
             ToolCall(
                 "call-1",
                 "edit_file",
@@ -321,7 +99,7 @@ class CliTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(trace, "[tool] edit_file(path='app.py')")
+        self.assertEqual(edit_trace, "[tool] edit_file(path='app.py')")
         self.assertEqual(write_trace, "[tool] write_file(path='new.py')")
 
     def test_command_trace_and_result_do_not_print_full_output(self) -> None:
@@ -351,14 +129,30 @@ class CliTests(unittest.TestCase):
         )
         self.assertNotIn("failure details", result_trace)
 
-    def test_system_prompt_requires_execution_evidence(self) -> None:
+    def test_read_and_error_results_have_bounded_summaries(self) -> None:
+        read_summary = _format_tool_result_trace(
+            ToolCall("call-1", "read_file", '{"path":"a.py"}'),
+            {
+                "success": True,
+                "data": {"start_line": 1, "end_line": 10, "total_lines": 20},
+            },
+        )
+        error_summary = _format_tool_result_trace(
+            ToolCall("call-2", "read_file", '{"path":"missing.py"}'),
+            {"success": False, "error": "FileNotFound", "message": "details"},
+        )
+
+        self.assertEqual(read_summary, "[result] lines=1-10, total=20")
+        self.assertEqual(error_summary, "[result] error=FileNotFound")
+
+    def test_system_prompt_describes_dynamic_autonomous_loop(self) -> None:
         lowered = SYSTEM_PROMPT.lower()
 
-        self.assertNotIn("read-only access", lowered)
-        self.assertIn("create and edit utf-8 text files", lowered)
-        self.assertIn("run_command", lowered)
+        self.assertIn("autonomous programming assistant", lowered)
+        self.assertIn("work iteratively", lowered)
+        self.assertIn("choose actions dynamically", lowered)
         self.assertIn("never claim tests passed", lowered)
-        self.assertIn("does not imply that the code is correct", lowered)
+        self.assertIn("tool fails", lowered)
 
     def test_empty_input_does_not_call_llm(self) -> None:
         client = Mock()
@@ -384,6 +178,37 @@ class CliTests(unittest.TestCase):
             [message["role"] for message in second_messages],
             ["system", "user", "user"],
         )
+
+    def test_max_steps_result_is_displayed_without_traceback(self) -> None:
+        client = Mock()
+        client.complete.return_value = LLMResponse(
+            None,
+            [ToolCall("call-1", "list_directory", '{"path":"."}')],
+        )
+        output = io.StringIO()
+
+        with patch("builtins.input", side_effect=["Keep going", "/exit"]), patch(
+            "sys.stdout", output
+        ):
+            run_cli(client=client, workspace_root=Path.cwd(), max_steps=2)
+
+        displayed = output.getvalue()
+        self.assertEqual(client.complete.call_count, 2)
+        self.assertIn("maximum step limit reached", displayed)
+        self.assertNotIn("Traceback", displayed)
+
+    def test_main_forwards_valid_max_steps(self) -> None:
+        with patch("coding_agent.cli.run_cli") as mocked_run_cli:
+            main(["--workspace", ".", "--max-steps", "7"])
+
+        self.assertEqual(mocked_run_cli.call_args.kwargs["max_steps"], 7)
+
+    def test_main_rejects_max_steps_outside_allowed_range(self) -> None:
+        for value in ("0", "51"):
+            with self.subTest(max_steps=value), patch(
+                "sys.stderr", io.StringIO()
+            ), self.assertRaises(SystemExit):
+                main(["--max-steps", value])
 
     def test_missing_configuration_is_reported(self) -> None:
         output = io.StringIO()
