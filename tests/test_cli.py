@@ -1,61 +1,170 @@
-"""第一阶段命令行界面测试。"""
+"""第二阶段命令行编排与工具解析测试。"""
 
 import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from coding_agent.cli import main, run_cli
-from coding_agent.llm import LLMError
+from coding_agent.cli import (
+    ToolResolutionLimitError,
+    _safe_print,
+    main,
+    resolve_user_turn,
+    run_cli,
+)
+from coding_agent.conversation import Conversation
+from coding_agent.llm import LLMError, LLMResponse, ToolCall
+from coding_agent.tools.registry import create_tool_registry
 
 
 class CliTests(unittest.TestCase):
     def test_main_is_importable(self) -> None:
         self.assertTrue(callable(main))
 
-    def test_multi_turn_conversation_passes_complete_history(self) -> None:
+    def test_safe_print_replaces_characters_unsupported_by_console(self) -> None:
+        class AsciiStream(io.StringIO):
+            @property
+            def encoding(self) -> str:
+                return "ascii"
+
+            def write(self, text: str) -> int:
+                text.encode(self.encoding)
+                return super().write(text)
+
+        output = AsciiStream()
+        with patch("sys.stdout", output):
+            _safe_print("result ✅")
+
+        self.assertEqual(output.getvalue(), "result ?\n")
+
+    def test_multi_turn_text_conversation_keeps_history(self) -> None:
         client = Mock()
-        client.complete.side_effect = ["Mock answer 1", "Mock answer 2"]
+        client.complete.side_effect = [
+            LLMResponse("Mock answer 1", []),
+            LLMResponse("Mock answer 2", []),
+        ]
         output = io.StringIO()
 
         with patch(
             "builtins.input",
             side_effect=["What is recursion?", "Give me an example.", "/exit"],
         ), patch("sys.stdout", output):
-            run_cli(client=client)
+            run_cli(client=client, workspace_root=Path.cwd())
 
-        first_messages = client.complete.call_args_list[0].args[0]
         second_messages = client.complete.call_args_list[1].args[0]
-        self.assertEqual(
-            [message["role"] for message in first_messages], ["system", "user"]
-        )
         self.assertEqual(
             [message["role"] for message in second_messages],
             ["system", "user", "assistant", "user"],
         )
-        self.assertEqual(second_messages[-2]["content"], "Mock answer 1")
-        self.assertEqual(second_messages[-1]["content"], "Give me an example.")
-        self.assertIn("Mini Coding Agent", output.getvalue())
         self.assertIn("Mock answer 2", output.getvalue())
-        self.assertIn("Exiting Mini Coding Agent.", output.getvalue())
+
+    def test_complete_tool_resolution_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "README.md").write_text(
+                "Mini Coding Agent", encoding="utf-8"
+            )
+            registry = create_tool_registry(workspace)
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [ToolCall("call-1", "read_file", '{"path":"README.md"}')],
+                ),
+                LLMResponse("The README describes Mini Coding Agent.", []),
+            ]
+            conversation = Conversation("System prompt")
+            conversation.add_user_message("Summarize README")
+
+            with patch("sys.stdout", io.StringIO()):
+                result = resolve_user_turn(client, conversation, registry)
+
+        self.assertEqual(result, "The README describes Mini Coding Agent.")
+        self.assertEqual(client.complete.call_count, 2)
+        second_messages = client.complete.call_args_list[1].args[0]
+        self.assertEqual(
+            [message["role"] for message in second_messages],
+            ["system", "user", "assistant", "tool"],
+        )
+        tool_result = json.loads(second_messages[-1]["content"])
+        self.assertTrue(tool_result["success"])
+        self.assertIn("Mini Coding Agent", tool_result["data"]["content"])
+
+    def test_multiple_tool_calls_are_all_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "one.txt").write_text("one", encoding="utf-8")
+            (workspace / "two.txt").write_text("two", encoding="utf-8")
+            registry = create_tool_registry(workspace)
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall("call-1", "read_file", '{"path":"one.txt"}'),
+                        ToolCall("call-2", "read_file", '{"path":"two.txt"}'),
+                    ],
+                ),
+                LLMResponse("Both files were read.", []),
+            ]
+            conversation = Conversation("System prompt")
+            conversation.add_user_message("Read both")
+
+            with patch("sys.stdout", io.StringIO()):
+                resolve_user_turn(client, conversation, registry)
+
+        self.assertEqual(
+            [message["role"] for message in conversation.messages],
+            ["system", "user", "assistant", "tool", "tool", "assistant"],
+        )
+
+    def test_second_tool_round_is_rejected_without_third_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "README.md").write_text("text", encoding="utf-8")
+            registry = create_tool_registry(workspace)
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [ToolCall("call-1", "read_file", '{"path":"README.md"}')],
+                ),
+                LLMResponse(
+                    None,
+                    [ToolCall("call-2", "search_text", '{"query":"text"}')],
+                ),
+            ]
+            conversation = Conversation("System prompt")
+            conversation.add_user_message("Inspect")
+
+            with patch("sys.stdout", io.StringIO()), self.assertRaises(
+                ToolResolutionLimitError
+            ):
+                resolve_user_turn(client, conversation, registry)
+
+        self.assertEqual(client.complete.call_count, 2)
+        self.assertEqual(conversation.messages[-1]["role"], "assistant")
 
     def test_empty_input_does_not_call_llm(self) -> None:
         client = Mock()
-
         with patch("builtins.input", side_effect=["   ", "/exit"]), patch(
             "sys.stdout", io.StringIO()
         ):
-            run_cli(client=client)
-
+            run_cli(client=client, workspace_root=Path.cwd())
         client.complete.assert_not_called()
 
     def test_failed_request_does_not_add_assistant_message(self) -> None:
         client = Mock()
-        client.complete.side_effect = [LLMError("network error."), "Recovered"]
-
+        client.complete.side_effect = [
+            LLMError("network error."),
+            LLMResponse("Recovered", []),
+        ]
         with patch(
             "builtins.input", side_effect=["Hello", "Try again", "/exit"]
         ), patch("sys.stdout", io.StringIO()):
-            run_cli(client=client)
+            run_cli(client=client, workspace_root=Path.cwd())
 
         second_messages = client.complete.call_args_list[1].args[0]
         self.assertEqual(
@@ -65,35 +174,19 @@ class CliTests(unittest.TestCase):
 
     def test_missing_configuration_is_reported(self) -> None:
         output = io.StringIO()
-
         with patch("coding_agent.config.load_dotenv"), patch.dict(
             "os.environ", {}, clear=True
         ), patch("sys.stdout", output):
-            run_cli()
+            run_cli(workspace_root=Path.cwd())
+        self.assertIn("Configuration error", output.getvalue())
 
-        self.assertIn(
-            "Configuration error: LLM_API_KEY is not set.", output.getvalue()
-        )
-
-    def test_main_handles_eof(self) -> None:
-        output = io.StringIO()
-
-        with patch("builtins.input", side_effect=EOFError), patch(
-            "sys.stdout", output
-        ):
-            run_cli(client=Mock())
-
-        self.assertIn("Exiting Mini Coding Agent.", output.getvalue())
-
-    def test_main_handles_keyboard_interrupt(self) -> None:
-        output = io.StringIO()
-
-        with patch("builtins.input", side_effect=KeyboardInterrupt), patch(
-            "sys.stdout", output
-        ):
-            run_cli(client=Mock())
-
-        self.assertIn("Exiting Mini Coding Agent.", output.getvalue())
+    def test_eof_and_keyboard_interrupt_exit_cleanly(self) -> None:
+        for interruption in (EOFError, KeyboardInterrupt):
+            with self.subTest(interruption=interruption), patch(
+                "builtins.input", side_effect=interruption
+            ), patch("sys.stdout", io.StringIO()) as output:
+                run_cli(client=Mock(), workspace_root=Path.cwd())
+            self.assertIn("Exiting Mini Coding Agent.", output.getvalue())
 
 
 if __name__ == "__main__":

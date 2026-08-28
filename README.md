@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 1: Basic LLM conversation.
+Stage 2: Read-only local tools.
 
 The project currently supports:
 
@@ -12,13 +12,18 @@ The project currently supports:
 - OpenAI-compatible LLM APIs
 - Multi-turn text conversation
 - Environment-based model configuration
+- Native LLM tool calling
+- Workspace-scoped directory listing
+- Workspace-scoped UTF-8 text file reading
+- Literal text search
+- Structured local tool execution
 
 It does not yet support:
 
-- File access
-- Tool calling
+- File modification
 - Command execution
-- An autonomous agent loop
+- Autonomous multi-step agent loops
+- Context compaction
 
 ## Requirements
 
@@ -53,26 +58,35 @@ The `.env` file is ignored by Git and must never be committed.
 ## Run
 
 ```bash
-python -m coding_agent
+python -m coding_agent --workspace .
 ```
 
 or:
 
 ```bash
-coding-agent
+coding-agent --workspace .
 ```
+
+The workspace defines the root directory that the read-only tools may inspect.
+Canonical paths outside this root are rejected. This is basic workspace-boundary
+enforcement, not a complete security sandbox. Secret-bearing `.env` variants are
+excluded from file reading and text search; `.env.example` remains inspectable.
 
 Example session:
 
 ```text
 Mini Coding Agent
-Stage 1 - LLM conversation
+Stage 2 - Read-only tools
+
+Workspace: /path/to/project
 
 Type your message.
 Type /exit to quit.
 
-> What is dynamic programming?
-<assistant response>
+> Read README.md and summarize it.
+[tool] read_file(path='README.md')
+Assistant:
+<assistant response based on the file content>
 > /exit
 Exiting Mini Coding Agent.
 ```
