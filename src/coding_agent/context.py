@@ -2,13 +2,16 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
+from hashlib import sha256
 import json
+import math
 from typing import Any
 
 from coding_agent.conversation import Message
 
 
 DEFAULT_MAX_CONTEXT_CHARS = 60_000
+DEFAULT_MAX_CONTEXT_TOKENS = 16_000
 DEFAULT_RECENT_GROUPS = 12
 MAX_COMPACT_ASSISTANT_CONTENT_CHARS = 500
 
@@ -23,6 +26,8 @@ class ContextStats:
     output_chars: int
     compacted_tool_results: int
     dropped_groups: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass
@@ -40,20 +45,25 @@ class ContextManager:
         self,
         max_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
         recent_groups: int = DEFAULT_RECENT_GROUPS,
+        max_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
     ) -> None:
         if max_chars < 1:
             raise ValueError("max_chars must be positive.")
         if recent_groups < 1:
             raise ValueError("recent_groups must be positive.")
+        if max_tokens < 1:
+            raise ValueError("max_tokens must be positive.")
         self.max_chars = max_chars
         self.recent_groups = recent_groups
+        self.max_tokens = max_tokens
         self.last_stats = ContextStats(0, 0, 0, 0, 0, 0)
 
     def build_context(self, messages: list[Message]) -> list[Message]:
         """按消息组压缩旧 Observation，并优先保留当前任务与最近历史。"""
         original = deepcopy(messages)
         input_chars = self._serialized_chars(original)
-        if input_chars <= self.max_chars:
+        input_tokens = self._estimated_tokens(original)
+        if input_chars <= self.max_chars and input_tokens <= self.max_tokens:
             self.last_stats = ContextStats(
                 input_messages=len(original),
                 output_messages=len(original),
@@ -61,6 +71,8 @@ class ContextManager:
                 output_chars=input_chars,
                 compacted_tool_results=0,
                 dropped_groups=0,
+                input_tokens=input_tokens,
+                output_tokens=input_tokens,
             )
             return original
 
@@ -80,12 +92,13 @@ class ContextManager:
             if groups[index].kind != "tool_interaction":
                 continue
             compacted_tool_results += self._compact_tool_group(groups[index])
-            if self._kept_chars(groups, kept) <= self.max_chars:
+            if self._within_budget(groups, kept):
                 return self._finish(
                     original,
                     groups,
                     kept,
                     input_chars,
+                    input_tokens,
                     compacted_tool_results,
                     dropped_groups,
                 )
@@ -95,12 +108,13 @@ class ContextManager:
                 continue
             kept[index] = False
             dropped_groups += 1
-            if self._kept_chars(groups, kept) <= self.max_chars:
+            if self._within_budget(groups, kept):
                 return self._finish(
                     original,
                     groups,
                     kept,
                     input_chars,
+                    input_tokens,
                     compacted_tool_results,
                     dropped_groups,
                 )
@@ -109,12 +123,13 @@ class ContextManager:
             if groups[index].kind != "tool_interaction":
                 continue
             compacted_tool_results += self._compact_tool_group(groups[index])
-            if self._kept_chars(groups, kept) <= self.max_chars:
+            if self._within_budget(groups, kept):
                 return self._finish(
                     original,
                     groups,
                     kept,
                     input_chars,
+                    input_tokens,
                     compacted_tool_results,
                     dropped_groups,
                 )
@@ -124,7 +139,7 @@ class ContextManager:
                 continue
             kept[index] = False
             dropped_groups += 1
-            if self._kept_chars(groups, kept) <= self.max_chars:
+            if self._within_budget(groups, kept):
                 break
 
         return self._finish(
@@ -132,6 +147,7 @@ class ContextManager:
             groups,
             kept,
             input_chars,
+            input_tokens,
             compacted_tool_results,
             dropped_groups,
         )
@@ -197,6 +213,12 @@ class ContextManager:
                 "tool": tool_name,
                 "success": result.get("success"),
             }
+            original_content = message.get("content")
+            if isinstance(original_content, str):
+                summary["original_chars"] = len(original_content)
+                summary["content_sha256"] = sha256(
+                    original_content.encode("utf-8")
+                ).hexdigest()[:16]
             for name in ("path", "query", "cwd", "command"):
                 if name in arguments:
                     summary[name] = arguments[name]
@@ -255,6 +277,26 @@ class ContextManager:
         return self._serialized_chars(self._flatten(groups, kept))
 
     @staticmethod
+    def _estimated_tokens(messages: list[Message]) -> int:
+        """无需额外 tokenizer 依赖，按 ASCII/CJK 比例估算请求 token 数。"""
+        serialized = json.dumps(
+            messages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        ascii_chars = sum(1 for character in serialized if ord(character) < 128)
+        non_ascii_chars = len(serialized) - ascii_chars
+        return max(1, math.ceil(ascii_chars / 4) + math.ceil(non_ascii_chars / 1.5))
+
+    def _within_budget(self, groups: list[_MessageGroup], kept: list[bool]) -> bool:
+        output = self._flatten(groups, kept)
+        return (
+            self._serialized_chars(output) <= self.max_chars
+            and self._estimated_tokens(output) <= self.max_tokens
+        )
+
+    @staticmethod
     def _flatten(groups: list[_MessageGroup], kept: list[bool]) -> list[Message]:
         """按原顺序展开仍被保留的消息组。"""
         return [
@@ -270,12 +312,14 @@ class ContextManager:
         groups: list[_MessageGroup],
         kept: list[bool],
         input_chars: int,
+        input_tokens: int,
         compacted_tool_results: int,
         dropped_groups: int,
     ) -> list[Message]:
         """保存统计并返回最终 Context View。"""
         output = self._flatten(groups, kept)
         output_chars = self._serialized_chars(output)
+        output_tokens = self._estimated_tokens(output)
         self.last_stats = ContextStats(
             input_messages=len(original),
             output_messages=len(output),
@@ -283,5 +327,7 @@ class ContextManager:
             output_chars=output_chars,
             compacted_tool_results=compacted_tool_results,
             dropped_groups=dropped_groups,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
         return output

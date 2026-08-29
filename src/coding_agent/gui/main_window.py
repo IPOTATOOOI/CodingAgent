@@ -38,6 +38,7 @@ from coding_agent.agent import AgentResult, DEFAULT_MAX_STEPS, MAX_MAX_STEPS
 from coding_agent.cli import SYSTEM_PROMPT
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
+from coding_agent.events import RuntimeEvent, RuntimeEventKind
 from coding_agent.gui.trace import (
     TracePresentation,
     format_tool_call,
@@ -45,6 +46,7 @@ from coding_agent.gui.trace import (
 )
 from coding_agent.gui.worker import AgentWorker, ClientFactory
 from coding_agent.llm import LLMClient, ToolCall
+from coding_agent.session import SessionStore
 from coding_agent.verification import (
     VERIFICATION_FAILED,
     VERIFICATION_NOT_REQUIRED,
@@ -115,6 +117,7 @@ class MainWindow(QMainWindow):
         max_steps: int = DEFAULT_MAX_STEPS,
         settings: Settings | None = None,
         client_factory: ClientFactory = LLMClient,
+        session_store: SessionStore | None = None,
     ) -> None:
         super().__init__()
         self.workspace = (workspace or Path.cwd()).resolve()
@@ -122,15 +125,18 @@ class MainWindow(QMainWindow):
             raise ValueError(f"workspace is not a directory: {self.workspace}")
         self._settings = settings
         self._client_factory = client_factory
+        self._session_store = session_store or SessionStore()
         self._conversation = Conversation(SYSTEM_PROMPT)
         self._worker: AgentWorker | None = None
         self._thread: QThread | None = None
         self._trace_items: dict[str, QListWidgetItem] = {}
         self._trace_presentations: dict[str, TracePresentation] = {}
         self._last_verification = VERIFICATION_NOT_REQUIRED
+        self._stream_buffer = ""
         self._started_at: float | None = None
         self._close_pending = False
         self._theme = "dark"
+        self._workspace_loaded = False
 
         self.setWindowTitle("Mini Coding Agent")
         self.resize(1460, 860)
@@ -321,14 +327,18 @@ class MainWindow(QMainWindow):
 
     def load_workspace(self, workspace: Path) -> None:
         """刷新文件树；真正的安全边界仍由 create_tool_registry 负责。"""
+        if self._workspace_loaded and self._thread is None:
+            self._save_session()
         resolved = workspace.resolve()
         if not resolved.is_dir():
             raise ValueError(f"workspace is not a directory: {resolved}")
         self.workspace = resolved
+        self._workspace_loaded = True
         root_index = self.file_model.setRootPath(str(resolved))
         self.project_tree.setRootIndex(root_index)
         self.workspace_label.setText(str(resolved))
         self.workspace_label.setToolTip(str(resolved))
+        self._restore_session()
 
     def choose_workspace(self) -> None:
         selected = QFileDialog.getExistingDirectory(
@@ -337,8 +347,11 @@ class MainWindow(QMainWindow):
             str(self.workspace),
         )
         if selected:
+            self.activity_list.clear()
+            self._trace_items.clear()
+            self._trace_presentations.clear()
             self.load_workspace(Path(selected))
-            self.clear_conversation()
+            self._reset_status_metrics()
 
     def preview_index(self, index: QModelIndex) -> None:
         path = Path(self.file_model.filePath(index))
@@ -362,7 +375,21 @@ class MainWindow(QMainWindow):
 
     def run_task(self) -> None:
         task = self.task_input.toPlainText().strip()
-        if not task or self._thread is not None:
+        if not task:
+            return
+        if self._worker is not None:
+            self._worker.add_steering(task)
+            self.task_input.clear()
+            self._append_message("USER STEERING", task, "#1f6feb")
+            self._add_activity(
+                "UPDATE",
+                "已收到补充指令",
+                "这条指令会在当前操作结束后的下一个决策步骤生效。",
+                task,
+                "info",
+            )
+            return
+        if self._thread is not None:
             return
         try:
             settings = self._settings or Settings.from_env()
@@ -378,6 +405,7 @@ class MainWindow(QMainWindow):
         self._trace_items.clear()
         self._trace_presentations.clear()
         self._last_verification = VERIFICATION_NOT_REQUIRED
+        self._stream_buffer = ""
         self._set_verification(VERIFICATION_NOT_REQUIRED)
         self._set_running(True)
         self.current_action_label.setText("当前状态：正在启动 Agent…")
@@ -396,9 +424,7 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.tool_started.connect(self._on_tool_started)
-        worker.tool_finished.connect(self._on_tool_finished)
-        worker.llm_retry.connect(self._on_llm_retry)
+        worker.runtime_event.connect(self._on_runtime_event)
         worker.completed.connect(self._on_agent_completed)
         worker.failed.connect(self._on_agent_failed)
         worker.finished.connect(thread.quit)
@@ -408,6 +434,61 @@ class MainWindow(QMainWindow):
         self._thread = thread
         self._worker = worker
         thread.start()
+
+    def _on_runtime_event(self, event: RuntimeEvent) -> None:
+        """把框架无关 Runtime Event 转换成具体 Qt 界面更新。"""
+        payload = event.payload
+        if event.kind in {
+            RuntimeEventKind.TOOL_STARTED,
+            RuntimeEventKind.TOOL_FINISHED,
+        }:
+            tool_call = ToolCall(
+                str(payload.get("tool_call_id", "")),
+                str(payload.get("tool_name", "")),
+                str(payload.get("arguments", "{}")),
+            )
+            if event.kind == RuntimeEventKind.TOOL_STARTED:
+                self._on_tool_started(event.step or 0, tool_call)
+            else:
+                self._on_tool_finished(
+                    event.step or 0,
+                    tool_call,
+                    payload.get("result", {}),
+                    str(payload.get("verification_status", VERIFICATION_NOT_REQUIRED)),
+                )
+            return
+        if event.kind == RuntimeEventKind.LLM_RETRY:
+            self._on_llm_retry(
+                int(payload.get("retry", 0)),
+                int(payload.get("max_retries", 0)),
+            )
+        elif event.kind == RuntimeEventKind.STEP_STARTED:
+            self._stream_buffer = ""
+            self.steps_status.setText(
+                f"Steps: {event.step or 0} / {self.max_steps_spin.value()}"
+            )
+            self.current_action_label.setText(
+                f"步骤 {event.step or 0}：Agent 正在分析下一步…"
+            )
+        elif event.kind == RuntimeEventKind.LLM_REQUEST_STARTED:
+            self.current_action_label.setText(
+                f"步骤 {event.step or 0}：正在等待模型决策…"
+            )
+        elif event.kind == RuntimeEventKind.LLM_TEXT_DELTA:
+            self._stream_buffer += str(payload.get("delta", ""))
+            preview = self._stream_buffer[-140:].replace("\n", " ")
+            self.current_action_label.setText(f"模型正在回复：{preview}")
+        elif event.kind == RuntimeEventKind.CONTEXT_BUILT:
+            compacted = int(payload.get("compacted_tool_results", 0))
+            dropped = int(payload.get("dropped_groups", 0))
+            if compacted or dropped:
+                self._add_activity(
+                    "CONTEXT",
+                    "已自动整理较早的上下文",
+                    f"压缩 {compacted} 个旧工具结果，省略 {dropped} 组较早消息。",
+                    str(payload),
+                    "info",
+                )
 
     def stop_task(self) -> None:
         """请求协作式停止；正在等待的网络请求或命令返回后才会生效。"""
@@ -423,6 +504,10 @@ class MainWindow(QMainWindow):
             return
         self._conversation = Conversation(SYSTEM_PROMPT)
         self.conversation_view.clear()
+        try:
+            self._session_store.delete(self.workspace)
+        except OSError as error:
+            self._append_runtime(f"Could not remove saved session: {error}", error=True)
         self.activity_list.clear()
         self._trace_items.clear()
         self._trace_presentations.clear()
@@ -544,6 +629,7 @@ class MainWindow(QMainWindow):
                 "Failed": "当前状态：任务未完成，请查看最后一条说明",
             }.get(state, f"当前状态：{state}")
         )
+        self._save_session()
 
     def _on_agent_failed(self, message: str) -> None:
         self._append_runtime(f"Agent worker failed: {message}", error=True)
@@ -556,6 +642,7 @@ class MainWindow(QMainWindow):
         )
         self._set_agent_state("Failed")
         self.current_action_label.setText("当前状态：后台执行失败，请查看详情")
+        self._save_session()
 
     def _worker_thread_finished(self) -> None:
         self._elapsed_timer.stop()
@@ -642,8 +729,12 @@ class MainWindow(QMainWindow):
             if markdown
             else escape(content).replace("\n", "<br>")
         )
-        if role == "USER TASK":
-            role_text = "USER · 用户指令"
+        if role in {"USER TASK", "USER STEERING"}:
+            role_text = (
+                "USER · 用户指令"
+                if role == "USER TASK"
+                else "USER · 运行中补充指令"
+            )
             row = (
                 '<td width="18%"></td>'
                 f'<td class="userBubble"><div class="bubbleRole">{role_text}</div>{body}</td>'
@@ -672,9 +763,15 @@ class MainWindow(QMainWindow):
         self._append_message("RUNTIME", content, "#f85149" if error else "#8b949e")
 
     def _set_running(self, running: bool) -> None:
-        self.run_button.setEnabled(not running)
+        self.run_button.setEnabled(True)
+        self.run_button.setText("Send Update" if running else "Run Task")
         self.stop_button.setEnabled(running)
-        self.task_input.setEnabled(not running)
+        self.task_input.setEnabled(True)
+        self.task_input.setPlaceholderText(
+            "输入补充指令，它会在下一个步骤生效。"
+            if running
+            else "Fix the failing tests, repair the implementation and verify the result."
+        )
         self.choose_workspace_button.setEnabled(not running)
         self.max_steps_spin.setEnabled(not running)
         self.new_session_button.setEnabled(not running)
@@ -709,12 +806,54 @@ class MainWindow(QMainWindow):
         except ConfigurationError:
             return "Not configured"
 
+    def _save_session(self) -> None:
+        """保存当前 Conversation；保存失败只提示，不改变 Agent 结果。"""
+        try:
+            model = (
+                self.model_label.text()
+                if hasattr(self, "model_label")
+                else self._model_name()
+            )
+            self._session_store.save(self._conversation, self.workspace, model)
+        except (OSError, ValueError) as error:
+            if hasattr(self, "conversation_view"):
+                self._append_runtime(f"Session save failed: {error}", error=True)
+
+    def _restore_session(self) -> None:
+        """恢复当前 Workspace 的最近会话，并只展示用户与最终回答。"""
+        try:
+            snapshot = self._session_store.load(self.workspace)
+        except ValueError as error:
+            self._conversation = Conversation(SYSTEM_PROMPT)
+            self._append_runtime(f"Saved session could not be restored: {error}", error=True)
+            return
+        if snapshot is None:
+            self._conversation = Conversation(SYSTEM_PROMPT)
+            self.conversation_view.clear()
+            self._append_runtime("Ready. Describe a coding task for this Workspace.")
+            return
+        self._conversation = snapshot.to_conversation()
+        self.conversation_view.clear()
+        self._append_runtime("已恢复这个 Workspace 最近保存的会话。")
+        for message in snapshot.messages:
+            role = message.get("role")
+            content = message.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if role == "user":
+                self._append_message("USER TASK", content, "#1f6feb")
+            elif role == "assistant" and not message.get("tool_calls"):
+                self._append_message(
+                    "AGENT FINAL RESPONSE", content, "#238636", markdown=True
+                )
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         if self._thread is not None and self._thread.isRunning():
             self._close_pending = True
             self.stop_task()
             event.ignore()
             return
+        self._save_session()
         event.accept()
 
     def toggle_theme(self) -> None:

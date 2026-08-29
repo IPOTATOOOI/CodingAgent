@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 8: PySide6 desktop GUI over the existing verified Agent Runtime.
+Stage 9: Runtime events, streaming interaction, steering, and durable sessions.
 
 The project currently supports:
 
@@ -36,6 +36,12 @@ The project currently supports:
 - Mutation generation tracking and bounded runtime verification reminders
 - A six-task evaluation runner with Agent-invisible independent verifiers
 - A PySide6 desktop GUI that reuses the existing Agent Runtime
+- A typed Runtime Event stream shared by the Agent Worker and GUI
+- Streaming model text with cooperative cancellation
+- Running-task steering and queued follow-up messages
+- Atomic, workspace-scoped conversation persistence and recovery
+- Character and estimated-token context budgets
+- Optional tool schema generation from typed Python callables
 
 It does not yet support:
 
@@ -52,6 +58,12 @@ Python >= 3.10
 
 ```bash
 pip install -e .
+```
+
+如需运行测试，请安装测试依赖：
+
+```bash
+pip install -e ".[test]"
 ```
 
 PySide6 是桌面界面的运行依赖，会随项目一起安装。GUI 和 CLI 使用同一套
@@ -109,8 +121,21 @@ GUI 采用适合演示 Autonomous Loop 的三栏结构：
 - 顶部太阳/月亮图标可以即时切换亮色和暗色主题，不会清空当前会话。
 
 LLM 请求和 Agent Loop 在 `QThread` Worker 中执行，主线程只处理 Qt 界面更新。
-Stop 使用协作式取消：设置线程安全的取消事件，Agent 会在当前 LLM 请求或当前一批
-Tool Calls 返回后的安全步骤边界停止。它不会强制终止正在运行的 Python 线程或子进程。
+Stop 使用协作式取消：流式 LLM 请求会在收到下一个数据块时停止；`run_command` 每
+100ms 检查一次取消状态并终止直接子进程；Agent 仍只在协议安全的步骤边界修改
+Conversation。它不会强制终止 Python Worker 线程，也不是操作系统级进程沙箱。
+
+任务运行期间，中间输入区保持可用，`Run Task` 会变成 `Send Update`。此时提交的文字
+会进入线程安全的 steering 队列，在当前操作结束后的下一个 Agent Step 作为新 User
+Message 生效。如果消息恰好在模型生成最终回答期间到达，Runtime 会继续下一步处理，
+不会静默丢弃它。`AgentMessageQueue` 也提供独立的 follow-up 队列，Worker 会在当前任务
+完成后按加入顺序执行。
+
+GUI 会在每次任务结束后自动原子保存 Conversation，并在再次打开相同 Workspace 时恢复。
+Windows 默认保存到 `%LOCALAPPDATA%/MiniCodingAgent/sessions`；其他平台使用用户目录下的
+`.mini-coding-agent/MiniCodingAgent/sessions`。文件名由 Workspace 规范路径的哈希生成，
+内容包括消息、模型名和更新时间，不保存 API Key。`New Session` / `Clear Conversation`
+会删除这个 Workspace 的已保存会话。
 
 选择 Workspace 只会刷新文件树并为下一次任务创建相应的 Tool Registry；文件读写和
 命令执行仍通过现有 Runtime 的规范路径检查，GUI 不会绕过 Workspace Boundary。
@@ -126,6 +151,15 @@ or:
 ```bash
 coding-agent --workspace . --max-steps 20
 ```
+
+CLI 默认仍不读写会话文件。需要时可以显式启用：
+
+```bash
+coding-agent --workspace . --resume-session
+coding-agent --workspace . --save-session
+```
+
+`--resume-session` 会恢复并在每轮后继续保存最近会话；`--save-session` 只从新会话开始保存。
 
 `--max-steps` limits the number of LLM responses in one user task. Its default is
 20 and its accepted range is 1 through 50. Reaching the limit stops immediately
@@ -167,8 +201,9 @@ The autonomous loop uses several deterministic Runtime safeguards:
 3. Four consecutive Agent Steps without a new Observation or successful Workspace
    mutation terminate the task with `no_progress`.
 4. Before every LLM request, `ContextManager` creates a bounded view of the complete
-   Conversation. The default character budget is 60000 and the recent-group target
-   is 12.
+   Conversation. The default budgets are 60000 characters and an estimated 16000
+   tokens; the recent-group target is 12. The dependency-free estimate treats CJK
+   text more conservatively than a fixed characters-per-token ratio.
 5. Older large Tool Results are compacted deterministically. System instructions,
    the current User Task, and recent actions are prioritized.
 6. Rate limits, connection failures, timeouts, and server 5xx responses may be
@@ -181,6 +216,18 @@ The full Conversation remains available to the local Runtime and debugging code;
 only the LLM-visible request view is compacted. Assistant Tool Call messages and all
 following Tool Results are retained, compacted, or removed as one group so native
 Tool Calling protocol relationships are not split.
+
+## Runtime Event 与扩展接口
+
+`Agent` 通过可选的 `on_event(RuntimeEvent)` 发布统一事件，包括 task/step 生命周期、
+Context 构建、LLM 请求与文本增量、重试、Tool 开始/结束、steering、Verification 和最终
+停止原因。事件是普通 dataclass，不依赖 Qt；GUI Worker 只负责把它转成 Qt Signal。
+原来的 `on_tool_call`、`on_tool_result` 和 `on_llm_retry` 回调继续保留，因此 CLI 和已有
+集成不需要立即迁移。
+
+新增工具可以使用 `ToolDefinition.from_callable(...)` 从类型注解生成基础 JSON Schema，
+再通过 `parameter_overrides` 明确补充 minimum、maximum 等安全约束。现有六个核心工具仍
+保留人工审查过的 schema，避免自动推断意外放宽 Runtime 边界。
 
 These are basic local Runtime safeguards, not a complete security sandbox. Child
 processes that are allowed still execute with the permissions of the current user.

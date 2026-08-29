@@ -18,6 +18,22 @@ class Conversation:
             {"role": "system", "content": system_prompt}
         ]
 
+    @classmethod
+    def from_messages(cls, messages: list[Message]) -> "Conversation":
+        """从经过校验的历史消息恢复 Conversation。"""
+        if not messages:
+            raise ValueError("conversation history cannot be empty.")
+        copied = deepcopy(messages)
+        if not isinstance(copied[0], dict) or copied[0].get("role") != "system":
+            raise ValueError("conversation history must start with a system message.")
+        allowed_roles = {"system", "user", "assistant", "tool"}
+        for message in copied:
+            if not isinstance(message, dict) or message.get("role") not in allowed_roles:
+                raise ValueError("conversation history contains an invalid message.")
+        conversation = cls(str(copied[0].get("content", "")))
+        conversation._messages = copied
+        return conversation
+
     def add_user_message(self, content: str) -> None:
         """向历史记录追加一条用户消息。"""
         self._messages.append({"role": "user", "content": content})

@@ -15,7 +15,9 @@ from coding_agent.agent import (
 )
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
+from coding_agent.events import RuntimeEvent, RuntimeEventKind
 from coding_agent.llm import LLMClient, ToolCall
+from coding_agent.session import SessionStore
 from coding_agent.tools.registry import ToolRegistry, create_tool_registry
 
 
@@ -47,6 +49,9 @@ def run_cli(
     workspace_root: Path | None = None,
     registry: ToolRegistry | None = None,
     max_steps: int = DEFAULT_MAX_STEPS,
+    session_store: SessionStore | None = None,
+    resume_session: bool = False,
+    save_session: bool = False,
 ) -> None:
     """运行具有自主工具循环的多轮命令行对话。"""
     workspace = (workspace_root or Path.cwd()).resolve()
@@ -67,16 +72,24 @@ def run_cli(
             print(f"Configuration error: {error}")
             return
 
+    store = session_store or SessionStore()
     conversation = Conversation(SYSTEM_PROMPT)
+    if resume_session:
+        try:
+            snapshot = store.load(workspace)
+        except ValueError as error:
+            _safe_print(f"Saved session could not be restored: {error}")
+        else:
+            if snapshot is not None:
+                conversation = snapshot.to_conversation()
+                _safe_print("Restored the latest session for this workspace.")
     tool_registry = registry or create_tool_registry(workspace)
     agent = Agent(
         llm_client=client,
         conversation=conversation,
         tool_registry=tool_registry,
         max_steps=max_steps,
-        on_tool_call=_print_tool_call,
-        on_tool_result=_print_tool_result,
-        on_llm_retry=_print_llm_retry,
+        on_event=_print_runtime_event,
     )
 
     while True:
@@ -95,6 +108,13 @@ def run_cli(
 
         result = agent.run(user_input)
         _print_agent_result(result)
+        if resume_session or save_session:
+            try:
+                client_model = getattr(client, "_model", "")
+                model = client_model if isinstance(client_model, str) else ""
+                store.save(conversation, workspace, model)
+            except (OSError, ValueError) as error:
+                _safe_print(f"Session save failed: {error}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -104,6 +124,16 @@ def main(argv: list[str] | None = None) -> None:
         "--workspace",
         default=".",
         help="workspace root available to local tools (default: current directory)",
+    )
+    parser.add_argument(
+        "--resume-session",
+        action="store_true",
+        help="restore and continue the latest session for this workspace",
+    )
+    parser.add_argument(
+        "--save-session",
+        action="store_true",
+        help="atomically save the conversation after each task",
     )
     parser.add_argument(
         "--max-steps",
@@ -124,12 +154,44 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(
             f"max-steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}"
         )
-    run_cli(workspace_root=workspace, max_steps=arguments.max_steps)
+    run_cli(
+        workspace_root=workspace,
+        max_steps=arguments.max_steps,
+        resume_session=arguments.resume_session,
+        save_session=arguments.save_session,
+    )
 
 
 def _print_tool_call(step_number: int, tool_call: ToolCall) -> None:
     """输出不包含敏感参数内容的工具调用摘要。"""
     _safe_print(f"[step {step_number}] {_format_tool_trace(tool_call)}")
+
+
+def _print_runtime_event(event: RuntimeEvent) -> None:
+    """让 CLI 与 GUI 消费同一种 Runtime Event，同时保持原有输出格式。"""
+    payload = event.payload
+    if event.kind in {
+        RuntimeEventKind.TOOL_STARTED,
+        RuntimeEventKind.TOOL_FINISHED,
+    }:
+        tool_call = ToolCall(
+            str(payload.get("tool_call_id", "")),
+            str(payload.get("tool_name", "")),
+            str(payload.get("arguments", "{}")),
+        )
+        if event.kind == RuntimeEventKind.TOOL_STARTED:
+            _print_tool_call(event.step or 0, tool_call)
+        else:
+            _print_tool_result(
+                event.step or 0,
+                tool_call,
+                payload.get("result", {}),
+            )
+    elif event.kind == RuntimeEventKind.LLM_RETRY:
+        _print_llm_retry(
+            int(payload.get("retry", 0)),
+            int(payload.get("max_retries", 0)),
+        )
 
 
 def _print_llm_retry(retry_number: int, max_retries: int) -> None:

@@ -7,7 +7,9 @@ from typing import Any
 
 from coding_agent.context import ContextManager
 from coding_agent.conversation import Conversation
-from coding_agent.llm import LLMClient, LLMError, ToolCall
+from coding_agent.events import RuntimeEvent, RuntimeEventCallback, RuntimeEventKind
+from coding_agent.llm import LLMClient, LLMError, LLMInterrupted, LLMResponse, ToolCall
+from coding_agent.message_queue import AgentMessageQueue
 from coding_agent.reliability import (
     LLMRetryPolicy,
     ReliabilityTracker,
@@ -68,6 +70,8 @@ class Agent:
         on_tool_result: ToolResultCallback | None = None,
         on_llm_retry: RetryCallback | None = None,
         should_cancel: CancellationCallback | None = None,
+        on_event: RuntimeEventCallback | None = None,
+        message_queue: AgentMessageQueue | None = None,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(
@@ -85,6 +89,8 @@ class Agent:
         self.on_tool_result = on_tool_result
         self.on_llm_retry = on_llm_retry
         self.should_cancel = should_cancel
+        self.on_event = on_event
+        self.message_queue = message_queue or AgentMessageQueue()
 
     def run(self, user_input: str) -> AgentResult:
         """运行一个有最大步数边界的自主任务。"""
@@ -95,6 +101,10 @@ class Agent:
         handled_tool_calls = 0
         verification_reminders = 0
         llm_retries = 0
+        self._emit(
+            RuntimeEventKind.TASK_STARTED,
+            payload={"task": user_input, "max_steps": self.max_steps},
+        )
 
         def handle_llm_retry(retry_number: int, max_retries: int) -> None:
             """统计 LLM Retry，并继续调用外部观察回调。"""
@@ -102,10 +112,15 @@ class Agent:
             llm_retries += 1
             if self.on_llm_retry is not None:
                 self.on_llm_retry(retry_number, max_retries)
+            self._emit(
+                RuntimeEventKind.LLM_RETRY,
+                step=completed_steps + 1,
+                payload={"retry": retry_number, "max_retries": max_retries},
+            )
 
         def build_result(content: str, stop_reason: str) -> AgentResult:
             """使用当前任务指标构造一致的 AgentResult。"""
-            return AgentResult(
+            result = AgentResult(
                 content=content,
                 stop_reason=stop_reason,
                 steps=completed_steps,
@@ -119,30 +134,68 @@ class Agent:
                     self.verification_tracker.mutation_generation
                 ),
             )
+            self._emit(
+                RuntimeEventKind.TASK_FINISHED,
+                step=completed_steps or None,
+                payload={
+                    "content": result.content,
+                    "stop_reason": result.stop_reason,
+                    "steps": result.steps,
+                    "tool_calls": result.tool_calls,
+                    "verification_status": result.verification_status,
+                    "llm_retries": result.llm_retries,
+                },
+            )
+            return result
 
         try:
             for step_number in range(1, self.max_steps + 1):
                 if self._cancellation_requested():
                     return build_result("Agent task was interrupted.", "interrupted")
+                self._apply_steering(step_number)
+                self._emit(RuntimeEventKind.STEP_STARTED, step=step_number)
                 try:
                     context = self.context_manager.build_context(
                         self.conversation.messages
                     )
+                    stats = self.context_manager.last_stats
+                    self._emit(
+                        RuntimeEventKind.CONTEXT_BUILT,
+                        step=step_number,
+                        payload={
+                            "input_messages": stats.input_messages,
+                            "output_messages": stats.output_messages,
+                            "input_chars": stats.input_chars,
+                            "output_chars": stats.output_chars,
+                            "input_tokens": stats.input_tokens,
+                            "output_tokens": stats.output_tokens,
+                            "compacted_tool_results": stats.compacted_tool_results,
+                            "dropped_groups": stats.dropped_groups,
+                        },
+                    )
+                    self._emit(RuntimeEventKind.LLM_REQUEST_STARTED, step=step_number)
                     response = self.retry_policy.execute(
-                        lambda: self.llm_client.complete(
-                            context,
-                            tools=self.tool_registry.schemas,
-                        ),
+                        lambda: self._complete(context, step_number),
                         on_retry=handle_llm_retry,
                     )
+                except LLMInterrupted:
+                    return build_result("Agent task was interrupted.", "interrupted")
                 except LLMError as error:
                     return build_result(f"LLM request failed: {error}", "llm_error")
 
-                # LLM 请求无法被本地 Event 强制打断，但返回后、写入对话前可以安全停止。
+                # 同步 Client 返回后仍需检查；流式 Client 还会在数据块之间检查取消。
                 if self._cancellation_requested():
                     return build_result("Agent task was interrupted.", "interrupted")
 
                 completed_steps = step_number
+                self._emit(
+                    RuntimeEventKind.LLM_RESPONSE_RECEIVED,
+                    step=step_number,
+                    payload={
+                        "content": response.content,
+                        "tool_call_count": len(response.tool_calls),
+                    },
+                )
                 if response.tool_calls:
                     if len(response.tool_calls) > MAX_TOOL_CALLS_PER_STEP:
                         return build_result(
@@ -159,14 +212,29 @@ class Agent:
                         response.tool_calls,
                     )
                     self.reliability_tracker.start_step()
+                    cancelled_during_tools = False
                     for tool_call in response.tool_calls:
                         handled_tool_calls += 1
                         if self.on_tool_call is not None:
                             self.on_tool_call(step_number, tool_call)
-                        repeated_action = (
-                            self.reliability_tracker.is_repeated_action(tool_call)
+                        self._emit(
+                            RuntimeEventKind.TOOL_STARTED,
+                            step=step_number,
+                            payload=self._tool_payload(tool_call),
                         )
-                        if repeated_action:
+                        if self._cancellation_requested():
+                            repeated_action = False
+                            cancelled_during_tools = True
+                            result = {
+                                "success": False,
+                                "error": "Cancelled",
+                                "message": "Tool call skipped because the task was stopped.",
+                            }
+                        else:
+                            repeated_action = (
+                                self.reliability_tracker.is_repeated_action(tool_call)
+                            )
+                        if not cancelled_during_tools and repeated_action:
                             result = {
                                 "success": False,
                                 "error": "RepeatedAction",
@@ -175,7 +243,7 @@ class Agent:
                                     "without an intervening action. Reconsider the approach."
                                 ),
                             }
-                        else:
+                        elif not cancelled_during_tools:
                             result = self.tool_registry.execute(
                                 tool_call.name,
                                 tool_call.arguments,
@@ -189,12 +257,43 @@ class Agent:
                             result,
                             repeated_action=repeated_action,
                         )
+                        previous_verification = (
+                            self.verification_tracker.verification_status
+                        )
                         self.verification_tracker.record_tool_result(
                             tool_call,
                             result,
                         )
+                        if (
+                            self.verification_tracker.verification_status
+                            != previous_verification
+                        ):
+                            self._emit(
+                                RuntimeEventKind.VERIFICATION_CHANGED,
+                                step=step_number,
+                                payload={
+                                    "status": (
+                                        self.verification_tracker.verification_status
+                                    )
+                                },
+                            )
                         if self.on_tool_result is not None:
                             self.on_tool_result(step_number, tool_call, result)
+                        self._emit(
+                            RuntimeEventKind.TOOL_FINISHED,
+                            step=step_number,
+                            payload={
+                                **self._tool_payload(tool_call),
+                                "result": result,
+                                "verification_status": (
+                                    self.verification_tracker.verification_status
+                                ),
+                            },
+                        )
+                        if self._cancellation_requested():
+                            cancelled_during_tools = True
+                    if cancelled_during_tools:
+                        return build_result("Agent task was interrupted.", "interrupted")
                     if self.reliability_tracker.finish_step():
                         return build_result(
                             (
@@ -207,12 +306,24 @@ class Agent:
 
                 if response.content:
                     self.conversation.add_assistant_message(response.content)
+                    # 模型生成最终文本期间若收到补充指令，先进入下一 Step 处理，
+                    # 避免用户刚点击“追加”任务就已经结束而丢失消息。
+                    if self.message_queue.pending_steering:
+                        continue
                     if not self.verification_tracker.completion_blocked:
                         return build_result(response.content, "completed")
                     if verification_reminders >= MAX_VERIFICATION_REMINDERS:
                         return build_result(response.content, "verification_required")
                     verification_reminders += 1
                     self.conversation.add_system_message(VERIFICATION_REMINDER)
+                    self._emit(
+                        RuntimeEventKind.VERIFICATION_CHANGED,
+                        step=step_number,
+                        payload={
+                            "status": self.verification_tracker.verification_status,
+                            "reminder": verification_reminders,
+                        },
+                    )
                     continue
 
                 return build_result(
@@ -231,3 +342,51 @@ class Agent:
     def _cancellation_requested(self) -> bool:
         """在不影响 CLI 默认行为的前提下查询协作式取消状态。"""
         return self.should_cancel is not None and self.should_cancel()
+
+    def _complete(self, context: list[dict[str, Any]], step_number: int) -> LLMResponse:
+        """优先使用显式声明支持的流式接口，并兼容原有同步 Client。"""
+        if getattr(self.llm_client, "supports_streaming", False) is True:
+            return self.llm_client.complete_stream(
+                context,
+                tools=self.tool_registry.schemas,
+                on_text_delta=lambda delta: self._emit(
+                    RuntimeEventKind.LLM_TEXT_DELTA,
+                    step=step_number,
+                    payload={"delta": delta},
+                ),
+                should_cancel=self._cancellation_requested,
+            )
+        return self.llm_client.complete(context, tools=self.tool_registry.schemas)
+
+    def _apply_steering(self, step_number: int) -> None:
+        """在 LLM 请求前把运行中追加的指令安全写入 Conversation。"""
+        for message in self.message_queue.drain_steering():
+            self.conversation.add_user_message(message)
+            self._emit(
+                RuntimeEventKind.STEERING_RECEIVED,
+                step=step_number,
+                payload={"content": message},
+            )
+
+    def _emit(
+        self,
+        kind: RuntimeEventKind,
+        *,
+        step: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """发布观察事件；观察者异常不得改变 Agent 核心行为。"""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(RuntimeEvent(kind=kind, step=step, payload=payload or {}))
+        except Exception:
+            return
+
+    @staticmethod
+    def _tool_payload(tool_call: ToolCall) -> dict[str, Any]:
+        return {
+            "tool_call_id": tool_call.id,
+            "tool_name": tool_call.name,
+            "arguments": tool_call.arguments,
+        }
