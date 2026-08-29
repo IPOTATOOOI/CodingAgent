@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 5: Autonomous agent loop.
+Stage 7: Verification and evaluation.
 
 The project currently supports:
 
@@ -26,13 +26,19 @@ The project currently supports:
 - Configurable per-task step limits
 - Recovery from structured tool errors and unsuccessful command exits
 - At most eight sequential tool calls in one model response
+- Bounded LLM-visible context with deterministic old-result compaction
+- Protocol-safe grouping of Assistant Tool Calls and Tool Results
+- Consecutive repeated-action detection
+- Deterministic no-progress termination
+- Bounded retries for transient LLM failures
+- Local command policy for package/environment mutation and direct deletion
+- Execution-grounded completion verification for supported code/config changes
+- Mutation generation tracking and bounded runtime verification reminders
+- A six-task evaluation runner with Agent-invisible independent verifiers
 
 It does not yet support:
 
-- Context compaction
-- Repeated-action and no-progress detection
-- Automatic retries for transient LLM failures
-- Mandatory post-edit verification
+- Semantic long-term memory, RAG, or vector storage
 - Persistent or interactive shell sessions
 - Background processes
 - OS-level execution sandboxing
@@ -98,9 +104,91 @@ workspace. Commands have a 30-second default timeout, a 120-second maximum timeo
 and separate 12000-character stdout/stderr context limits. The Agent's
 `LLM_API_KEY` is removed from the child process environment.
 
+Before process creation, a local command policy blocks selected package/environment
+mutation commands, including `pip install`, `python -m pip install`, `conda install`,
+`npm install`, `yarn add`, and equivalent uninstall/remove forms. Direct executables
+such as `rm`, `rmdir`, `del`, `erase`, and `Remove-Item` are also blocked. Normal
+development commands such as `python -m pytest`, `python -m unittest`, `npm test`,
+and `npm run build` remain allowed.
+
 This is shell-free local command execution with workspace-scoped working directories
 and execution limits. It is not an OS-level sandbox: child processes still run with
 the permissions of the current operating-system user.
+
+## Reliability Safeguards
+
+The autonomous loop uses several deterministic Runtime safeguards:
+
+1. `max_steps` remains the final hard upper bound.
+2. The third consecutive identical Tool Action is not executed; the model receives
+   a structured `RepeatedAction` result and can change strategy.
+3. Four consecutive Agent Steps without a new Observation or successful Workspace
+   mutation terminate the task with `no_progress`.
+4. Before every LLM request, `ContextManager` creates a bounded view of the complete
+   Conversation. The default character budget is 60000 and the recent-group target
+   is 12.
+5. Older large Tool Results are compacted deterministically. System instructions,
+   the current User Task, and recent actions are prioritized.
+6. Rate limits, connection failures, timeouts, and server 5xx responses may be
+   retried twice using 0.5- and 1-second delays. Authentication and model-not-found
+   errors are not retried.
+7. Selected environment-mutating and directly destructive commands are rejected
+   before subprocess creation with `CommandBlocked`.
+
+The full Conversation remains available to the local Runtime and debugging code;
+only the LLM-visible request view is compacted. Assistant Tool Call messages and all
+following Tool Results are retained, compacted, or removed as one group so native
+Tool Calling protocol relationships are not split.
+
+These are basic local Runtime safeguards, not a complete security sandbox. Child
+processes that are allowed still execute with the permissions of the current user.
+
+## Verification Gate
+
+Successful `write_file` or `edit_file` execution does not by itself prove that new
+code works. After supported source-code or project-configuration files are changed,
+the Runtime marks the latest mutation generation as `unverified`. A later recognized
+test, build, or syntax-check command must finish without a timeout and with exit code
+0 before the Runtime accepts a final answer as `completed`.
+
+Recognized commands include Python pytest, unittest, compileall and py_compile forms;
+direct `test_*.py` and `*_test.py` scripts; and common npm, yarn, pnpm, Go, Cargo,
+Maven and Gradle test/build commands. A generic successful command such as
+`python script.py` or `python -c ...` is not automatically verification evidence.
+
+If the model tries to finish while the latest generation is unverified or failed,
+the Runtime rejects that completion attempt and adds a short system reminder. At
+most two reminders are added. Continued unsupported completion attempts stop with
+`verification_required`, while `max_steps` remains the final step boundary. A new
+supported mutation after a successful check creates a new generation and requires
+new evidence. Documentation-only `.md`, `.txt`, and `.rst` changes do not require
+this code verification gate.
+
+This mechanism requires execution-based evidence for supported changes; it does not
+guarantee correctness. A syntax check is weaker than a behavioral test, and passing
+tests can still miss defects.
+
+## Evaluation
+
+The `eval/` directory contains six small coding tasks. For every task, the runner:
+
+1. copies a source fixture into a fresh `TemporaryDirectory()`;
+2. creates a fresh Agent whose workspace is only that copied fixture;
+3. runs the task prompt using the configured real LLM;
+4. runs an independent `verify.py` located outside the Agent workspace;
+5. records verifier PASS/FAIL and runtime metrics.
+
+Run all tasks or one task with:
+
+```bash
+python eval/runner.py
+python eval/runner.py --task single_bug_fix --max-steps 12
+```
+
+Verified Success Rate is based only on independent verifier exit codes, not the
+Agent's final text or stop reason. Results depend on the selected model and run: the
+suite is intentionally small, LLM behavior is nondeterministic, it measures only
+selected small coding tasks, and passing tests is not formal proof of correctness.
 
 ## Agent Loop
 
@@ -128,7 +216,7 @@ Example session:
 
 ```text
 Mini Coding Agent
-Stage 5 - Autonomous agent loop
+Stage 7 - Verification and evaluation
 
 Workspace: /path/to/project
 Max steps per task: 12
@@ -157,14 +245,18 @@ You can try this flow without touching the agent's own source tree:
 python -m coding_agent --workspace examples/demo_project --max-steps 12
 ```
 
-Stage 5 can use a failed execution result to choose further inspection, editing, and
+Stage 7 can use a failed execution result to choose further inspection, editing, and
 execution actions until the model returns final text or a Runtime bound stops the
 task. It does not hard-code a `run -> read -> edit -> run` workflow; the model selects
-the next tool from the accumulated conversation.
+the next tool from the accumulated conversation. For supported source/configuration
+changes, a final text response is accepted only after the latest mutation generation
+has successful recognized execution evidence.
 
 Possible `AgentResult.stop_reason` values are `completed`, `max_steps`,
-`interrupted`, `invalid_response`, and `llm_error`. A response containing more than
-eight tool calls is treated as an invalid response and none of those calls execute.
+`interrupted`, `invalid_response`, `llm_error`, `no_progress`, and
+`verification_required`. A response
+containing more than eight tool calls is treated as an invalid response and none of
+those calls execute.
 
 ## Development Stages
 

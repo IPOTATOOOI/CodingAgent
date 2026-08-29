@@ -18,6 +18,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+eval/results/*.json
 
 # 编辑器配置
 .vscode/

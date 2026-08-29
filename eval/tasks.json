@@ -1,0 +1,40 @@
+{
+  "tasks": [
+    {
+      "task_id": "single_bug_fix",
+      "prompt": "The arithmetic implementation contains a bug. Locate it, fix it, and verify the project using the existing environment.",
+      "fixture": "tasks/task_01/workspace",
+      "verifier": "tasks/task_01/verify.py"
+    },
+    {
+      "task_id": "missing_function",
+      "prompt": "A statistics helper is incomplete. Implement the missing behavior and verify the project without installing packages.",
+      "fixture": "tasks/task_02/workspace",
+      "verifier": "tasks/task_02/verify.py"
+    },
+    {
+      "task_id": "string_processing",
+      "prompt": "The text normalization behavior is incorrect for common phrases. Locate the defect, repair it, and verify the result.",
+      "fixture": "tasks/task_03/workspace",
+      "verifier": "tasks/task_03/verify.py"
+    },
+    {
+      "task_id": "multi_file_repair",
+      "prompt": "The receipt calculation has multiple defects across the project. Locate and repair them, then run the available verification.",
+      "fixture": "tasks/task_04/workspace",
+      "verifier": "tasks/task_04/verify.py"
+    },
+    {
+      "task_id": "create_and_integrate",
+      "prompt": "Add a reusable username validation module and update the existing profile creation code to use it. Verify the project afterward.",
+      "fixture": "tasks/task_05/workspace",
+      "verifier": "tasks/task_05/verify.py"
+    },
+    {
+      "task_id": "search_and_repair",
+      "prompt": "Product labels are formatted incorrectly somewhere in this project. Locate the implementation, repair it, and verify the project.",
+      "fixture": "tasks/task_06/workspace",
+      "verifier": "tasks/task_06/verify.py"
+    }
+  ]
+}
