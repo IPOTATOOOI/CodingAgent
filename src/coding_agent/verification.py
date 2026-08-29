@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import posixpath
 import re
 from typing import Any
 
@@ -50,6 +51,7 @@ class VerificationTracker:
         self.mutation_generation = 0
         self.verified_generation = 0
         self.verification_status = VERIFICATION_NOT_REQUIRED
+        self.pending_mutation_paths: set[str] = set()
 
     @property
     def completion_blocked(self) -> bool:
@@ -63,8 +65,10 @@ class VerificationTracker:
     ) -> None:
         """根据真实工具结果更新 mutation generation 和验证状态。"""
         if self._is_verifiable_mutation(tool_call, result):
+            data = result["data"]
             self.mutation_generation += 1
             self.verification_status = VERIFICATION_UNVERIFIED
+            self.pending_mutation_paths.add(_normalized_relative_path(data["path"]))
             return
 
         if tool_call.name != "run_command" or not self.completion_blocked:
@@ -79,12 +83,20 @@ class VerificationTracker:
         data = result.get("data", {})
         if not isinstance(data, dict):
             return
+        cwd = data.get("cwd", ".")
+        if not isinstance(cwd, str) or not verification_command_covers_paths(
+            command,
+            cwd,
+            self.pending_mutation_paths,
+        ):
+            return
         if data.get("timed_out"):
             self.verification_status = VERIFICATION_FAILED
             return
         if data.get("exit_code") == 0:
             self.verified_generation = self.mutation_generation
             self.verification_status = VERIFICATION_VERIFIED
+            self.pending_mutation_paths.clear()
         else:
             self.verification_status = VERIFICATION_FAILED
 
@@ -153,6 +165,38 @@ def is_verification_command(command: list[str]) -> bool:
     return False
 
 
+def verification_command_covers_paths(
+    command: list[str],
+    cwd: str,
+    mutated_paths: set[str],
+) -> bool:
+    """判断窄范围语法检查是否覆盖全部待验证修改路径。"""
+    if not mutated_paths or not command:
+        return False
+    executable = _normalized_executable(command[0])
+    arguments = [argument.casefold() for argument in command[1:]]
+    if not _is_python_executable(executable):
+        return True
+    if len(arguments) < 2 or arguments[0] != "-m":
+        return True
+
+    module = arguments[1]
+    targets = [
+        _command_target_path(cwd, argument)
+        for argument in command[3:]
+        if argument and not argument.startswith("-")
+    ]
+    if module == "py_compile":
+        return bool(targets) and mutated_paths.issubset(set(targets))
+    if module == "compileall":
+        coverage_roots = targets or [_normalized_relative_path(cwd)]
+        return all(
+            any(_path_is_within(path, root) for root in coverage_roots)
+            for path in mutated_paths
+        )
+    return True
+
+
 def _is_python_verification(arguments: list[str]) -> bool:
     """识别 Python 模块检查和直接测试脚本。"""
     if len(arguments) >= 2 and arguments[0] == "-m":
@@ -173,6 +217,27 @@ def _normalized_executable(value: str) -> str:
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return name
+
+
+def _command_target_path(cwd: str, target: str) -> str:
+    """把命令目标规范化为 workspace 相对 POSIX 路径。"""
+    normalized_target = target.replace("\\", "/")
+    if re.match(r"^[a-zA-Z]:/", normalized_target) or normalized_target.startswith("/"):
+        return normalized_target.casefold()
+    return _normalized_relative_path(posixpath.join(cwd, normalized_target))
+
+
+def _normalized_relative_path(value: str) -> str:
+    """规范化工具结果中的 workspace 相对路径。"""
+    normalized = posixpath.normpath(value.replace("\\", "/"))
+    return "." if normalized in {"", "."} else normalized.casefold()
+
+
+def _path_is_within(path: str, root: str) -> bool:
+    """判断相对文件路径是否位于指定相对目录内。"""
+    if root == ".":
+        return not path.startswith("../") and not path.startswith("/")
+    return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 def _is_python_executable(executable: str) -> bool:

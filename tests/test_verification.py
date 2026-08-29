@@ -44,6 +44,7 @@ def _command_result(exit_code: int = 0, timed_out: bool = False) -> dict:
             "timed_out": timed_out,
             "stdout": "",
             "stderr": "",
+            "cwd": ".",
         },
     }
 
@@ -126,6 +127,63 @@ class VerificationTrackerTests(unittest.TestCase):
         self.assertTrue(
             is_verification_command(["python.exe", "-m", "compileall", "src"])
         )
+
+    def test_py_compile_must_cover_pending_mutation(self) -> None:
+        tracker = VerificationTracker()
+        tracker.record_tool_result(_mutation_call("src/app.py"), _mutation_result("src/app.py"))
+        tracker.record_tool_result(
+            _command_call(["python", "-m", "py_compile", "src/other.py"]),
+            _command_result(),
+        )
+
+        self.assertEqual(tracker.verification_status, "unverified")
+        self.assertEqual(tracker.pending_mutation_paths, {"src/app.py"})
+
+        tracker.record_tool_result(
+            _command_call(["python", "-m", "py_compile", "app.py"], "run-2"),
+            {
+                **_command_result(),
+                "data": {**_command_result()["data"], "cwd": "src"},
+            },
+        )
+
+        self.assertEqual(tracker.verification_status, "verified")
+        self.assertEqual(tracker.pending_mutation_paths, set())
+
+    def test_compileall_directory_must_cover_all_pending_mutations(self) -> None:
+        tracker = VerificationTracker()
+        for index, path in enumerate(("src/app.py", "config/settings.json"), 1):
+            tracker.record_tool_result(
+                _mutation_call(path, f"edit-{index}"),
+                _mutation_result(path),
+            )
+
+        tracker.record_tool_result(
+            _command_call(["python", "-m", "compileall", "src"]),
+            _command_result(),
+        )
+        self.assertEqual(tracker.verification_status, "unverified")
+
+        tracker.record_tool_result(
+            _command_call(["python", "-m", "compileall", "."], "run-2"),
+            _command_result(),
+        )
+        self.assertEqual(tracker.verification_status, "verified")
+
+    def test_project_test_covers_multiple_pending_paths(self) -> None:
+        tracker = VerificationTracker()
+        for index, path in enumerate(("src/app.py", "config/settings.json"), 1):
+            tracker.record_tool_result(
+                _mutation_call(path, f"edit-{index}"),
+                _mutation_result(path),
+            )
+
+        tracker.record_tool_result(
+            _command_call(["python", "-m", "pytest"]),
+            _command_result(),
+        )
+
+        self.assertEqual(tracker.verification_status, "verified")
 
     def test_timed_out_verification_is_failed(self) -> None:
         tracker = VerificationTracker()

@@ -45,6 +45,9 @@ class AgentResult:
     steps: int
     tool_calls: int = 0
     verification_status: str = VERIFICATION_NOT_REQUIRED
+    verification_reminders: int = 0
+    llm_retries: int = 0
+    mutation_generations: int = 0
 
 
 class Agent:
@@ -88,6 +91,14 @@ class Agent:
         completed_steps = 0
         handled_tool_calls = 0
         verification_reminders = 0
+        llm_retries = 0
+
+        def handle_llm_retry(retry_number: int, max_retries: int) -> None:
+            """统计 LLM Retry，并继续调用外部观察回调。"""
+            nonlocal llm_retries
+            llm_retries += 1
+            if self.on_llm_retry is not None:
+                self.on_llm_retry(retry_number, max_retries)
 
         def build_result(content: str, stop_reason: str) -> AgentResult:
             """使用当前任务指标构造一致的 AgentResult。"""
@@ -98,6 +109,11 @@ class Agent:
                 tool_calls=handled_tool_calls,
                 verification_status=(
                     self.verification_tracker.verification_status
+                ),
+                verification_reminders=verification_reminders,
+                llm_retries=llm_retries,
+                mutation_generations=(
+                    self.verification_tracker.mutation_generation
                 ),
             )
 
@@ -112,7 +128,7 @@ class Agent:
                             context,
                             tools=self.tool_registry.schemas,
                         ),
-                        on_retry=self.on_llm_retry,
+                        on_retry=handle_llm_retry,
                     )
                 except LLMError as error:
                     return build_result(f"LLM request failed: {error}", "llm_error")

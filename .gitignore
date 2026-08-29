@@ -19,6 +19,7 @@ env/
 .coverage
 htmlcov/
 eval/results/*.json
+eval/results/*.json.tmp
 
 # 编辑器配置
 .vscode/

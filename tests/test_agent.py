@@ -428,6 +428,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.steps, 1)
         self.assertEqual(client.complete.call_count, 2)
         retry_callback.assert_called_once_with(1, 2)
+        self.assertEqual(result.llm_retries, 1)
 
     def test_transient_llm_errors_stop_after_retry_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

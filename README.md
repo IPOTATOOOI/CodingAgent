@@ -156,6 +156,11 @@ direct `test_*.py` and `*_test.py` scripts; and common npm, yarn, pnpm, Go, Carg
 Maven and Gradle test/build commands. A generic successful command such as
 `python script.py` or `python -c ...` is not automatically verification evidence.
 
+The Runtime also tracks pending modified paths. Project-wide tests and builds may
+cover all pending changes, while narrow syntax checks must target them. For example,
+`python -m py_compile other.py` cannot verify a change to `app.py`, and a
+`compileall src` check cannot verify an unrelated modified `config/settings.json`.
+
 If the model tries to finish while the latest generation is unverified or failed,
 the Runtime rejects that completion attempt and adds a short system reminder. At
 most two reminders are added. Continued unsupported completion attempts stop with
@@ -183,12 +188,43 @@ Run all tasks or one task with:
 ```bash
 python eval/runner.py
 python eval/runner.py --task single_bug_fix --max-steps 12
+python eval/runner.py --runs 5
+```
+
+The runner prints bounded per-step progress by default; `--quiet-trace` hides it.
+Every completed task atomically updates the result JSON, so an interrupted suite
+retains prior results as an incomplete checkpoint. Multi-run summaries include
+per-task pass rates, suite-run success rate, completion/max-step rates, and p50/p95
+steps, tool calls, and duration.
+
+Result metadata records the model name, Coding Agent version, Git commit, Python and
+platform versions, max steps, run count, and whether a custom base URL was configured.
+It never stores the API key or Base URL value. Agent metrics include Runtime
+verification reminders, LLM retries, and mutation generations.
+
+The runner captures verifier source in memory before the Agent starts, creates the
+temporary verifier snapshot only after the Agent stops, and checks that the original
+fixture and verifier were not modified. This strengthens verifier integrity but is
+still not an OS-level process sandbox.
+
+The four Completion Gate acceptance scenarios can be rerun and saved with:
+
+```bash
+python eval/verification_cases.py --max-steps 12
+python eval/verification_cases.py --case B --max-steps 12
 ```
 
 Verified Success Rate is based only on independent verifier exit codes, not the
 Agent's final text or stop reason. Results depend on the selected model and run: the
 suite is intentionally small, LLM behavior is nondeterministic, it measures only
 selected small coding tasks, and passing tests is not formal proof of correctness.
+
+## Continuous Integration
+
+GitHub Actions runs the unit suite, syntax compilation, editable installation, and
+package-version consistency checks on Linux and Windows with Python 3.10 and 3.13.
+Real LLM evaluations remain manual because they use external credentials, cost, and
+nondeterministic model behavior.
 
 ## Agent Loop
 

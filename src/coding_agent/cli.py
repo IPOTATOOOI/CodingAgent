@@ -36,6 +36,7 @@ Use an available test, build, or syntax-check command after the most recent modi
 If verification fails, continue repairing the project.
 Do not install packages only for verification; use the existing environment.
 If only a weaker verification such as syntax checking is available, state that limitation accurately.
+After a recognized verification command succeeds and the requested work is complete, return the final answer immediately without extra inspection or cleanup.
 If a tool fails or a command exits unsuccessfully, treat the result as an observation and decide whether another action can make progress.
 When the task is complete, stop calling tools and return a concise final answer.
 Do not continue performing unrelated cleanup or additional exploration after the requested task has been completed."""
