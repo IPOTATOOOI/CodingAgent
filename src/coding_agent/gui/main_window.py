@@ -1,16 +1,18 @@
 """Mini Coding Agent 的三栏开发者工具主窗口。"""
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from html import escape
 from pathlib import Path
 import time
 from typing import Any
 
-from PySide6.QtCore import QDir, QModelIndex, Qt, QThread, QTimer
+from PySide6.QtCore import QDir, QModelIndex, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QCloseEvent, QTextDocumentFragment
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFileSystemModel,
@@ -110,6 +112,8 @@ STOP_REASON_TEXT = {
 class MainWindow(QMainWindow):
     """负责界面状态，Agent 执行完全交给后台 Worker。"""
 
+    session_save_failed = Signal(str)
+
     def __init__(
         self,
         workspace: Path | None = None,
@@ -126,6 +130,12 @@ class MainWindow(QMainWindow):
         self._settings = settings
         self._client_factory = client_factory
         self._session_store = session_store or SessionStore()
+        self._session_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="session-save",
+        )
+        self._session_executor_shutdown = False
+        self.session_save_failed.connect(self._on_session_save_failed)
         self._conversation = Conversation(SYSTEM_PROMPT)
         self._worker: AgentWorker | None = None
         self._thread: QThread | None = None
@@ -213,6 +223,18 @@ class MainWindow(QMainWindow):
         self.new_session_button = QPushButton("New Session")
         self.new_session_button.clicked.connect(self.clear_conversation)
         layout.addWidget(self.new_session_button)
+        self.auto_save_checkbox = QCheckBox("Auto-save")
+        self.auto_save_checkbox.setChecked(True)
+        self.auto_save_checkbox.setToolTip(
+            "任务结束后在后台保存当前 Workspace 的有界会话快照"
+        )
+        layout.addWidget(self.auto_save_checkbox)
+        self.clear_saved_sessions_button = QPushButton("Clear Saved")
+        self.clear_saved_sessions_button.setToolTip("删除全部 Workspace 的已保存会话")
+        self.clear_saved_sessions_button.clicked.connect(
+            self.clear_all_saved_sessions
+        )
+        layout.addWidget(self.clear_saved_sessions_button)
         self.theme_button = QToolButton()
         self.theme_button.setObjectName("themeButton")
         self.theme_button.setFixedSize(34, 30)
@@ -505,6 +527,7 @@ class MainWindow(QMainWindow):
         self._conversation = Conversation(SYSTEM_PROMPT)
         self.conversation_view.clear()
         try:
+            self._flush_session_saves()
             self._session_store.delete(self.workspace)
         except OSError as error:
             self._append_runtime(f"Could not remove saved session: {error}", error=True)
@@ -513,6 +536,27 @@ class MainWindow(QMainWindow):
         self._trace_presentations.clear()
         self._append_runtime("New conversation started.")
         self._reset_status_metrics()
+
+    def clear_all_saved_sessions(self) -> None:
+        """经用户确认后删除 SessionStore 中的全部会话文件。"""
+        if self._thread is not None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "清除全部已保存会话",
+            "将删除所有 Workspace 的已保存会话。当前内存中的对话不会被清空。继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._flush_session_saves()
+            removed = self._session_store.clear_all()
+        except OSError as error:
+            self._append_runtime(f"Could not clear saved sessions: {error}", error=True)
+            return
+        self._append_runtime(f"已删除 {removed} 个保存的会话文件。")
 
     def _on_tool_started(self, step: int, tool_call: ToolCall) -> None:
         presentation = format_tool_call(tool_call)
@@ -776,6 +820,7 @@ class MainWindow(QMainWindow):
         self.max_steps_spin.setEnabled(not running)
         self.new_session_button.setEnabled(not running)
         self.clear_button.setEnabled(not running)
+        self.clear_saved_sessions_button.setEnabled(not running)
 
     def _set_agent_state(self, state: str) -> None:
         self.agent_status.setText(f"Agent: {state}")
@@ -807,23 +852,51 @@ class MainWindow(QMainWindow):
             return "Not configured"
 
     def _save_session(self) -> None:
-        """保存当前 Conversation；保存失败只提示，不改变 Agent 结果。"""
+        """把不可变消息快照提交给单线程后台写入器。"""
+        if self._session_executor_shutdown:
+            return
+        if (
+            hasattr(self, "auto_save_checkbox")
+            and not self.auto_save_checkbox.isChecked()
+        ):
+            return
+        model = (
+            self.model_label.text()
+            if hasattr(self, "model_label")
+            else self._model_name()
+        )
+        messages = self._conversation.messages
+        workspace = self.workspace
+        future = self._session_executor.submit(
+            self._session_store.save_messages,
+            messages,
+            workspace,
+            model,
+        )
+        future.add_done_callback(self._session_save_completed)
+
+    def _session_save_completed(self, future: Future[Path]) -> None:
+        """从后台线程把保存异常安全转回 Qt 主线程。"""
         try:
-            model = (
-                self.model_label.text()
-                if hasattr(self, "model_label")
-                else self._model_name()
-            )
-            self._session_store.save(self._conversation, self.workspace, model)
+            future.result()
         except (OSError, ValueError) as error:
-            if hasattr(self, "conversation_view"):
-                self._append_runtime(f"Session save failed: {error}", error=True)
+            self.session_save_failed.emit(f"{type(error).__name__}: {error}")
+
+    def _on_session_save_failed(self, message: str) -> None:
+        self._append_runtime(f"Session save failed: {message}", error=True)
+
+    def _flush_session_saves(self) -> None:
+        """等待之前提交的保存任务完成，确保后续删除不会被旧任务覆盖。"""
+        if self._session_executor_shutdown:
+            return
+        self._session_executor.submit(lambda: None).result()
 
     def _restore_session(self) -> None:
         """恢复当前 Workspace 的最近会话，并只展示用户与最终回答。"""
         try:
+            self._session_store.cleanup()
             snapshot = self._session_store.load(self.workspace)
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             self._conversation = Conversation(SYSTEM_PROMPT)
             self._append_runtime(f"Saved session could not be restored: {error}", error=True)
             return
@@ -834,7 +907,10 @@ class MainWindow(QMainWindow):
             return
         self._conversation = snapshot.to_conversation()
         self.conversation_view.clear()
-        self._append_runtime("已恢复这个 Workspace 最近保存的会话。")
+        restored_message = "已恢复这个 Workspace 最近保存的会话。"
+        if snapshot.compacted:
+            restored_message += " 较早的工具结果已按存储上限安全压缩。"
+        self._append_runtime(restored_message)
         for message in snapshot.messages:
             role = message.get("role")
             content = message.get("content")
@@ -854,6 +930,9 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._save_session()
+        if not self._session_executor_shutdown:
+            self._session_executor.shutdown(wait=True, cancel_futures=False)
+            self._session_executor_shutdown = True
         event.accept()
 
     def toggle_theme(self) -> None:

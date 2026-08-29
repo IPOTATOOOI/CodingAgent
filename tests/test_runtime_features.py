@@ -1,8 +1,10 @@
 """统一事件、消息队列和会话持久化的回归测试。"""
 
 import json
+import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock
 
@@ -11,7 +13,7 @@ from coding_agent.conversation import Conversation
 from coding_agent.events import RuntimeEventKind
 from coding_agent.llm import LLMResponse, ToolCall
 from coding_agent.message_queue import AgentMessageQueue
-from coding_agent.session import SessionStore
+from coding_agent.session import SessionStore, SessionTooLargeError
 from coding_agent.tools.registry import create_tool_registry
 
 
@@ -107,6 +109,94 @@ class RuntimeFeatureTests(unittest.TestCase):
             self.assertNotIn("api", json.loads(path.read_text(encoding="utf-8")))
             self.assertTrue(store.delete(workspace))
             self.assertIsNone(store.load(workspace))
+
+    def test_session_compacts_old_tool_results_and_stays_within_hard_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            conversation = Conversation("System")
+            for index in range(6):
+                conversation.add_user_message(f"Task {index}")
+                conversation.add_assistant_tool_calls(
+                    None,
+                    [
+                        ToolCall(
+                            f"call-{index}",
+                            "read_file",
+                            json.dumps({"path": f"file-{index}.py"}),
+                        )
+                    ],
+                )
+                conversation.add_tool_result(
+                    f"call-{index}",
+                    json.dumps(
+                        {"success": True, "data": {"content": "x" * 5000}}
+                    ),
+                )
+            conversation.add_user_message("Current task")
+            store = SessionStore(
+                root / "sessions",
+                max_bytes=8_000,
+                recent_groups=1,
+            )
+
+            path = store.save(conversation, workspace, "test-model")
+            snapshot = store.load(workspace)
+
+            self.assertLessEqual(path.stat().st_size, store.max_bytes)
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            self.assertTrue(snapshot.compacted)
+            assistant_ids = {
+                call["id"]
+                for message in snapshot.messages
+                for call in message.get("tool_calls", [])
+            }
+            tool_ids = {
+                message["tool_call_id"]
+                for message in snapshot.messages
+                if message.get("role") == "tool"
+            }
+            self.assertEqual(assistant_ids, tool_ids)
+
+    def test_session_rejects_oversized_protected_user_message(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            conversation = Conversation("System")
+            conversation.add_user_message("中" * 10_000)
+            store = SessionStore(root / "sessions", max_bytes=5_000)
+
+            with self.assertRaises(SessionTooLargeError):
+                store.save(conversation, workspace, "test-model")
+
+            self.assertFalse(store.path_for(workspace).exists())
+
+    def test_session_cleanup_enforces_age_count_and_clear_all(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "sessions"
+            root.mkdir()
+            now = time.time()
+            paths = [root / f"session-{index}.json" for index in range(4)]
+            for index, path in enumerate(paths):
+                path.write_text("{}", encoding="utf-8")
+                modified = now - (2 * 24 * 60 * 60 if index == 0 else index)
+                path.touch()
+                os.utime(path, (modified, modified))
+            stale_temporary = root / ".session-stale.tmp"
+            stale_temporary.write_text("partial", encoding="utf-8")
+            old_time = now - 2 * 24 * 60 * 60
+            os.utime(stale_temporary, (old_time, old_time))
+            store = SessionStore(root, retention_days=1, max_sessions=2)
+
+            removed = store.cleanup(now=now)
+
+            self.assertEqual(removed, 3)
+            self.assertEqual(len(list(root.glob("*.json"))), 2)
+            self.assertEqual(store.clear_all(), 2)
+            self.assertEqual(list(root.glob("*.json")), [])
 
     def test_event_observer_failure_does_not_break_agent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

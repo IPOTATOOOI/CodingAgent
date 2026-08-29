@@ -131,11 +131,19 @@ Message 生效。如果消息恰好在模型生成最终回答期间到达，Run
 不会静默丢弃它。`AgentMessageQueue` 也提供独立的 follow-up 队列，Worker 会在当前任务
 完成后按加入顺序执行。
 
-GUI 会在每次任务结束后自动原子保存 Conversation，并在再次打开相同 Workspace 时恢复。
-Windows 默认保存到 `%LOCALAPPDATA%/MiniCodingAgent/sessions`；其他平台使用用户目录下的
-`.mini-coding-agent/MiniCodingAgent/sessions`。文件名由 Workspace 规范路径的哈希生成，
-内容包括消息、模型名和更新时间，不保存 API Key。`New Session` / `Clear Conversation`
-会删除这个 Workspace 的已保存会话。
+GUI 默认会在每次任务结束后把 Conversation 快照交给单线程后台写入器，并在再次打开
+相同 Workspace 时恢复；顶部 `Auto-save` 可以随时关闭自动保存，`Clear Saved` 经确认后
+删除全部 Workspace 的已保存会话。Windows 默认保存到
+`%LOCALAPPDATA%/MiniCodingAgent/sessions`；其他平台使用用户目录下的
+`.mini-coding-agent/MiniCodingAgent/sessions`。文件名由平台规范化后的 Workspace 路径
+哈希生成。
+
+单个会话文件默认硬限制为 2 MiB。超过限制时，SessionStore 会按完整 Assistant Tool Call /
+Tool Result 协议组压缩较早结果并保留最近上下文；如果受保护的 System/User 消息本身仍然
+超限，则拒绝写入而不会产生半个文件。默认只保留最近 20 个、30 天内的会话。Unix 会话
+目录和文件分别使用 `0700` / `0600` 权限。保存内容是本地明文消息、模型名和时间戳，
+可能包含源代码与有界工具输出，但不保存 API Key；敏感项目可关闭 Auto-save。
+`New Session` / `Clear Conversation` 会删除当前 Workspace 的已保存会话。
 
 选择 Workspace 只会刷新文件树并为下一次任务创建相应的 Tool Registry；文件读写和
 命令执行仍通过现有 Runtime 的规范路径检查，GUI 不会绕过 Workspace Boundary。
@@ -160,6 +168,7 @@ coding-agent --workspace . --save-session
 ```
 
 `--resume-session` 会恢复并在每轮后继续保存最近会话；`--save-session` 只从新会话开始保存。
+CLI 与 GUI 使用相同的 2 MiB 上限、协议安全压缩和默认保留策略。
 
 `--max-steps` limits the number of LLM responses in one user task. Its default is
 20 and its accepted range is 1 through 50. Reaching the limit stops immediately

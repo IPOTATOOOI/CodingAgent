@@ -3,14 +3,16 @@
 import os
 from pathlib import Path
 import tempfile
+from time import sleep
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionSpinBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QStyleOptionSpinBox
 
 from coding_agent.config import Settings
 from coding_agent.agent import DEFAULT_MAX_STEPS
@@ -59,12 +61,16 @@ class GuiTests(unittest.TestCase):
         self.application.processEvents()
         self.temporary_directory.cleanup()
 
-    def _window(self, client_factory=lambda settings: _SlowSuccessClient()):
+    def _window(
+        self,
+        client_factory=lambda settings: _SlowSuccessClient(),
+        session_store=None,
+    ):
         window = MainWindow(
             self.workspace,
             settings=self.settings,
             client_factory=client_factory,
-            session_store=self.session_store,
+            session_store=session_store or self.session_store,
         )
         self.windows.append(window)
         return window
@@ -168,6 +174,66 @@ class GuiTests(unittest.TestCase):
         displayed = window.conversation_view.toPlainText()
         self.assertIn("Restore me", displayed)
         self.assertIn("Restored answer", displayed)
+
+    def test_auto_save_can_be_disabled(self) -> None:
+        window = self._window()
+        window.auto_save_checkbox.setChecked(False)
+        window._conversation.add_user_message("Do not persist")
+
+        window._save_session()
+        window._flush_session_saves()
+
+        self.assertFalse(self.session_store.path_for(self.workspace).exists())
+
+    def test_session_save_runs_outside_gui_thread(self) -> None:
+        class SlowSessionStore(SessionStore):
+            def save_messages(self, messages, workspace, model):
+                sleep(0.2)
+                return super().save_messages(messages, workspace, model)
+
+        slow_store = SlowSessionStore(self.workspace / ".slow-sessions")
+        window = self._window(session_store=slow_store)
+        started = time.monotonic()
+
+        window._save_session()
+        returned_after = time.monotonic() - started
+
+        self.assertLess(returned_after, 0.1)
+        window._flush_session_saves()
+        self.assertTrue(slow_store.path_for(self.workspace).exists())
+
+    def test_clear_all_saved_sessions_requires_confirmation(self) -> None:
+        other_workspace = self.workspace / "other"
+        other_workspace.mkdir()
+        self.session_store.save(
+            self._conversation_for_test("Current"),
+            self.workspace,
+            "test-model",
+        )
+        self.session_store.save(
+            self._conversation_for_test("Other"),
+            other_workspace,
+            "test-model",
+        )
+        window = self._window()
+
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            window.clear_all_saved_sessions()
+
+        self.assertEqual(list(self.session_store.root.glob("*.json")), [])
+        self.assertIn("已删除 2 个", window.conversation_view.toPlainText())
+
+    @staticmethod
+    def _conversation_for_test(content: str):
+        from coding_agent.conversation import Conversation
+
+        conversation = Conversation("System")
+        conversation.add_user_message(content)
+        return conversation
 
     def test_agent_worker_does_not_block_main_thread_and_restores_ui(self) -> None:
         window = self._window()
