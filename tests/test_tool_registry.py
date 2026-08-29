@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from coding_agent.tools.registry import create_tool_registry
+from coding_agent.tools.registry import ToolDefinition, create_tool_registry
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -107,6 +107,25 @@ class ToolRegistryTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["exit_code"], 3)
+
+    def test_definition_can_generate_schema_from_typed_callable(self) -> None:
+        def sample(path: str, count: int = 2, tags: list[str] | None = None) -> dict:
+            return {"path": path, "count": count, "tags": tags}
+
+        definition = ToolDefinition.from_callable(
+            sample,
+            "Sample tool",
+            parameter_descriptions={"path": "Relative path."},
+            parameter_overrides={"count": {"minimum": 1, "maximum": 5}},
+        )
+
+        parameters = definition.parameters
+        self.assertEqual(parameters["required"], ["path"])
+        self.assertEqual(parameters["properties"]["path"]["type"], "string")
+        self.assertEqual(parameters["properties"]["count"]["maximum"], 5)
+        self.assertEqual(
+            parameters["properties"]["tags"]["type"], ["array", "null"]
+        )
 
 
 if __name__ == "__main__":

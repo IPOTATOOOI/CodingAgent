@@ -2,9 +2,11 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import inspect
 import json
 from pathlib import Path
-from typing import Any
+import types
+from typing import Any, get_args, get_origin, get_type_hints, Union
 
 from coding_agent.tools.command import (
     CommandTools,
@@ -26,6 +28,78 @@ class ToolDefinition:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+
+    @classmethod
+    def from_callable(
+        cls,
+        handler: ToolHandler,
+        description: str,
+        *,
+        name: str | None = None,
+        parameter_descriptions: dict[str, str] | None = None,
+        parameter_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> "ToolDefinition":
+        """从函数签名生成基础 schema，并允许显式补充安全约束。"""
+        signature = inspect.signature(handler)
+        hints = get_type_hints(handler)
+        properties: dict[str, dict[str, Any]] = {}
+        required: list[str] = []
+        descriptions = parameter_descriptions or {}
+        overrides = parameter_overrides or {}
+        for parameter_name, parameter in signature.parameters.items():
+            annotation = hints.get(parameter_name, parameter.annotation)
+            schema = cls._annotation_schema(annotation)
+            if parameter_name in descriptions:
+                schema["description"] = descriptions[parameter_name]
+            schema.update(overrides.get(parameter_name, {}))
+            if parameter.default is inspect.Parameter.empty:
+                required.append(parameter_name)
+            else:
+                schema["default"] = parameter.default
+            properties[parameter_name] = schema
+        parameters: dict[str, Any] = {
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": False,
+        }
+        if required:
+            parameters["required"] = required
+        return cls(
+            name=name or handler.__name__,
+            description=description,
+            parameters=parameters,
+            handler=handler,
+        )
+
+    @staticmethod
+    def _annotation_schema(annotation: Any) -> dict[str, Any]:
+        """把项目工具常用的 Python 类型映射到 JSON Schema 子集。"""
+        origin = get_origin(annotation)
+        arguments = get_args(annotation)
+        if origin in {Union, types.UnionType}:
+            mapped = [
+                ToolDefinition._annotation_schema(item)["type"]
+                for item in arguments
+            ]
+            return {"type": mapped}
+        if origin is list:
+            item_type = arguments[0] if arguments else Any
+            return {
+                "type": "array",
+                "items": ToolDefinition._annotation_schema(item_type),
+            }
+        mapping = {
+            str: "string",
+            int: "integer",
+            float: "number",
+            bool: "boolean",
+            dict: "object",
+            type(None): "null",
+            Any: "object",
+        }
+        if annotation not in mapping:
+            raise TypeError(f"unsupported tool parameter annotation: {annotation!r}")
+        return {"type": mapping[annotation]}
 
     @property
     def schema(self) -> dict[str, Any]:
@@ -136,6 +210,10 @@ class ToolRegistry:
             "integer": lambda item: isinstance(item, int)
             and not isinstance(item, bool),
             "array": lambda item: isinstance(item, list),
+            "number": lambda item: isinstance(item, (int, float))
+            and not isinstance(item, bool),
+            "boolean": lambda item: isinstance(item, bool),
+            "object": lambda item: isinstance(item, dict),
             "null": lambda item: item is None,
         }
         return any(checks[item](value) for item in allowed_types if item in checks)
@@ -146,10 +224,13 @@ class ToolRegistry:
         return {"success": False, "error": error, "message": message}
 
 
-def create_tool_registry(workspace_root: Path) -> ToolRegistry:
+def create_tool_registry(
+    workspace_root: Path,
+    should_cancel: Callable[[], bool] | None = None,
+) -> ToolRegistry:
     """为指定工作区创建六个本地工具。"""
     filesystem = FilesystemTools(workspace_root)
-    commands = CommandTools(workspace_root)
+    commands = CommandTools(workspace_root, should_cancel=should_cancel)
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(

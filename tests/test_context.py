@@ -193,6 +193,21 @@ class ContextManagerTests(unittest.TestCase):
 
         self.assertEqual(messages, original)
 
+    def test_token_budget_handles_cjk_more_conservatively_than_char_budget(self) -> None:
+        messages = [
+            {"role": "system", "content": "系统"},
+            {"role": "user", "content": "旧任务" * 300},
+            {"role": "assistant", "content": "旧回答" * 300},
+            {"role": "user", "content": "当前任务"},
+        ]
+        manager = ContextManager(max_chars=10_000, max_tokens=120, recent_groups=1)
+
+        result = manager.build_context(messages)
+
+        self.assertLess(len(result), len(messages))
+        self.assertLessEqual(manager.last_stats.output_tokens, manager.max_tokens)
+        self.assertGreater(manager.last_stats.input_tokens, manager.max_tokens)
+
 
 if __name__ == "__main__":
     unittest.main()

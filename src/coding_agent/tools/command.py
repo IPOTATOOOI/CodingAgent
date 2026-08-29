@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable
 
 from coding_agent.tools.filesystem import ToolError, resolve_workspace_path
 
@@ -106,9 +106,11 @@ class CommandTools:
         self,
         workspace_root: Path,
         policy: CommandPolicy | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.policy = policy or CommandPolicy()
+        self.should_cancel = should_cancel
 
     def run_command(
         self,
@@ -136,49 +138,63 @@ class CommandTools:
 
         started_at = time.monotonic()
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=resolved_cwd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout_seconds,
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 env=execution_env,
-                check=False,
             )
         except FileNotFoundError:
             raise ToolError(
                 "CommandNotFound",
                 f"Executable '{command[0]}' was not found.",
             ) from None
-        except subprocess.TimeoutExpired as error:
-            duration_ms = round((time.monotonic() - started_at) * 1000)
-            return self._result(
-                command=command,
-                cwd=resolved_cwd,
-                exit_code=None,
-                timed_out=True,
-                stdout=self._decode_timeout_output(error.stdout),
-                stderr=self._decode_timeout_output(error.stderr),
-                duration_ms=duration_ms,
-            )
         except OSError:
             raise ToolError(
                 "CommandExecutionError",
                 f"Executable '{command[0]}' could not be started.",
             ) from None
 
+        stdout = ""
+        stderr = ""
+        timed_out = False
+        cancelled = False
+        try:
+            while True:
+                elapsed = time.monotonic() - started_at
+                remaining = timeout_seconds - elapsed
+                if self.should_cancel is not None and self.should_cancel():
+                    cancelled = True
+                    stdout, stderr = self._stop_process(process)
+                    break
+                if remaining <= 0:
+                    timed_out = True
+                    stdout, stderr = self._stop_process(process)
+                    break
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except KeyboardInterrupt:
+            self._stop_process(process)
+            raise
+
         duration_ms = round((time.monotonic() - started_at) * 1000)
         return self._result(
             command=command,
             cwd=resolved_cwd,
-            exit_code=completed.returncode,
-            timed_out=False,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            exit_code=None if timed_out or cancelled else process.returncode,
+            timed_out=timed_out,
+            cancelled=cancelled,
+            stdout=stdout,
+            stderr=stderr,
             duration_ms=duration_ms,
         )
 
@@ -216,6 +232,7 @@ class CommandTools:
         cwd: Path,
         exit_code: int | None,
         timed_out: bool,
+        cancelled: bool,
         stdout: str,
         stderr: str,
         duration_ms: int,
@@ -233,6 +250,7 @@ class CommandTools:
             "cwd": "." if not relative_cwd.parts else relative_cwd.as_posix(),
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "cancelled": cancelled,
             "stdout": bounded_stdout,
             "stderr": bounded_stderr,
             "stdout_truncated": stdout_truncated,
@@ -241,17 +259,21 @@ class CommandTools:
         }
 
     @staticmethod
+    def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+        """终止仍在运行的直接子进程，并回收管道中的有界输出来源。"""
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            return process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return process.communicate()
+
+    @staticmethod
     def _truncate(content: str, limit: int) -> tuple[str, bool]:
         """裁剪传给模型的字符数，并标记是否发生裁剪。"""
         if len(content) > limit:
             return content[:limit], True
         return content, False
-
-    @staticmethod
-    def _decode_timeout_output(output: str | bytes | None) -> str:
-        """统一 TimeoutExpired 中可能出现的文本或字节输出。"""
-        if output is None:
-            return ""
-        if isinstance(output, bytes):
-            return output.decode("utf-8", errors="replace")
-        return output

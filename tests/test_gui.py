@@ -21,6 +21,7 @@ from coding_agent.gui.main_window import (
 )
 from coding_agent.gui.trace import format_tool_call, format_tool_result
 from coding_agent.llm import LLMResponse, ToolCall
+from coding_agent.session import SessionStore
 
 
 class _SlowSuccessClient:
@@ -49,6 +50,7 @@ class GuiTests(unittest.TestCase):
         ) as file:
             file.write("value = 1\n")
         self.settings = Settings(api_key="test-key", model="test-model")
+        self.session_store = SessionStore(self.workspace / ".test-sessions")
         self.windows: list[MainWindow] = []
 
     def tearDown(self) -> None:
@@ -62,6 +64,7 @@ class GuiTests(unittest.TestCase):
             self.workspace,
             settings=self.settings,
             client_factory=client_factory,
+            session_store=self.session_store,
         )
         self.windows.append(window)
         return window
@@ -152,6 +155,20 @@ class GuiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_preview_text(self.workspace, secret)
 
+    def test_saved_workspace_conversation_is_restored(self) -> None:
+        from coding_agent.conversation import Conversation
+
+        conversation = Conversation("System")
+        conversation.add_user_message("Restore me")
+        conversation.add_assistant_message("Restored answer")
+        self.session_store.save(conversation, self.workspace, "test-model")
+
+        window = self._window()
+
+        displayed = window.conversation_view.toPlainText()
+        self.assertIn("Restore me", displayed)
+        self.assertIn("Restored answer", displayed)
+
     def test_agent_worker_does_not_block_main_thread_and_restores_ui(self) -> None:
         window = self._window()
         window.task_input.setPlainText("finish the task")
@@ -161,7 +178,9 @@ class GuiTests(unittest.TestCase):
         returned_after = time.monotonic() - started
 
         self.assertLess(returned_after, 0.1)
-        self.assertFalse(window.run_button.isEnabled())
+        self.assertTrue(window.run_button.isEnabled())
+        self.assertEqual(window.run_button.text(), "Send Update")
+        self.assertTrue(window.task_input.isEnabled())
         self._wait_for_worker(window)
         self.assertTrue(window.run_button.isEnabled())
         self.assertEqual(window.agent_status.text(), "Agent: Completed")
@@ -220,6 +239,22 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(window.run_button.isEnabled())
         self.assertEqual(window.agent_status.text(), "Agent: Ready")
         self.assertIn("interrupted", window.conversation_view.toPlainText().lower())
+
+    def test_running_task_accepts_a_steering_update(self) -> None:
+        window = self._window()
+        window.task_input.setPlainText("initial task")
+        window.run_task()
+        window.task_input.setPlainText("also inspect tests")
+
+        window.run_task()
+
+        self.assertEqual(window.task_input.toPlainText(), "")
+        self.assertIn(
+            "运行中补充指令",
+            window.conversation_view.toPlainText(),
+        )
+        self.assertIn("also inspect tests", window.conversation_view.toPlainText())
+        self._wait_for_worker(window)
 
     def test_trace_formatters_hide_file_content_and_bound_output(self) -> None:
         call = ToolCall(

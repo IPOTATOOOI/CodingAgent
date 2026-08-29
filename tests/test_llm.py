@@ -142,6 +142,49 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertFalse(raised.exception.transient)
 
+    @patch("coding_agent.llm.OpenAI")
+    def test_streaming_combines_text_and_tool_call_deltas(self, openai_class) -> None:
+        def chunk(content=None, tool_calls=None):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=content,
+                            tool_calls=tool_calls or [],
+                        )
+                    )
+                ]
+            )
+
+        first_tool = SimpleNamespace(
+            index=0,
+            id="call-1",
+            function=SimpleNamespace(name="read_file", arguments='{"path":'),
+        )
+        second_tool = SimpleNamespace(
+            index=0,
+            id=None,
+            function=SimpleNamespace(name=None, arguments='"README.md"}'),
+        )
+        openai_class.return_value.chat.completions.create.return_value = iter(
+            [chunk("I will "), chunk("read."), chunk(tool_calls=[first_tool]), chunk(tool_calls=[second_tool])]
+        )
+        deltas = []
+        client = LLMClient(Settings(api_key="test-key", model="test-model"))
+
+        result = client.complete_stream(
+            [{"role": "user", "content": "Read"}],
+            on_text_delta=deltas.append,
+        )
+
+        self.assertEqual(result.content, "I will read.")
+        self.assertEqual(deltas, ["I will ", "read."])
+        self.assertEqual(result.tool_calls[0].id, "call-1")
+        self.assertEqual(result.tool_calls[0].name, "read_file")
+        self.assertEqual(result.tool_calls[0].arguments, '{"path":"README.md"}')
+        request = openai_class.return_value.chat.completions.create.call_args.kwargs
+        self.assertTrue(request["stream"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 import io
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,6 +17,7 @@ from coding_agent.cli import (
 )
 from coding_agent.llm import LLMError, LLMResponse, ToolCall
 from coding_agent.agent import AgentResult
+from coding_agent.session import SessionStore
 
 
 class CliTests(unittest.TestCase):
@@ -251,6 +253,45 @@ class CliTests(unittest.TestCase):
             main(["--workspace", ".", "--max-steps", "7"])
 
         self.assertEqual(mocked_run_cli.call_args.kwargs["max_steps"], 7)
+
+    def test_main_forwards_explicit_session_options(self) -> None:
+        with patch("coding_agent.cli.run_cli") as mocked_run_cli:
+            main(["--resume-session", "--save-session"])
+
+        self.assertTrue(mocked_run_cli.call_args.kwargs["resume_session"])
+        self.assertTrue(mocked_run_cli.call_args.kwargs["save_session"])
+
+    def test_cli_can_save_and_resume_workspace_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            store = SessionStore(Path(directory) / "sessions")
+            first_client = Mock()
+            first_client.complete.return_value = LLMResponse("Saved answer", [])
+            with patch("builtins.input", side_effect=["First task", "/exit"]), patch(
+                "sys.stdout", io.StringIO()
+            ):
+                run_cli(
+                    client=first_client,
+                    workspace_root=workspace,
+                    session_store=store,
+                    save_session=True,
+                )
+
+            second_client = Mock()
+            second_client.complete.return_value = LLMResponse("Continued", [])
+            with patch("builtins.input", side_effect=["Next task", "/exit"]), patch(
+                "sys.stdout", io.StringIO()
+            ):
+                run_cli(
+                    client=second_client,
+                    workspace_root=workspace,
+                    session_store=store,
+                    resume_session=True,
+                )
+
+        roles = [message["role"] for message in second_client.complete.call_args.args[0]]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
 
     def test_main_rejects_max_steps_outside_allowed_range(self) -> None:
         for value in ("0", "51"):

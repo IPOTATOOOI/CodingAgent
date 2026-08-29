@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -110,6 +111,24 @@ class CommandToolsTests(unittest.TestCase):
 
         self.assertIsNone(result["exit_code"])
         self.assertTrue(result["timed_out"])
+        self.assertFalse(result["cancelled"])
+
+    def test_cancellation_stops_running_process_before_timeout(self) -> None:
+        started = time.monotonic()
+        tools = CommandTools(
+            self.workspace,
+            should_cancel=lambda: time.monotonic() - started > 0.15,
+        )
+
+        result = tools.run_command(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            timeout_seconds=10,
+        )
+
+        self.assertTrue(result["cancelled"])
+        self.assertFalse(result["timed_out"])
+        self.assertIsNone(result["exit_code"])
+        self.assertLess(time.monotonic() - started, 2)
 
     def test_stdout_and_stderr_are_truncated_independently(self) -> None:
         result = self.tools.run_command(

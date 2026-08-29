@@ -163,7 +163,12 @@ def _format_command_result(
     kind = _command_kind(command)
     exit_code = data.get("exit_code")
     timed_out = bool(data.get("timed_out"))
-    if timed_out:
+    cancelled = bool(data.get("cancelled"))
+    if cancelled:
+        title = "命令已停止"
+        summary = "用户请求停止任务，Runtime 已终止当前命令。"
+        tone = "warning"
+    elif timed_out:
         title = "命令执行超时"
         summary = "命令没有在规定时间内结束，Agent 将根据已有输出调整策略。"
         tone = "error"
@@ -198,6 +203,7 @@ def _format_command_result(
         f"工作目录：{data.get('cwd', arguments.get('cwd', '.'))}\n"
         f"退出码：{exit_code}\n"
         f"是否超时：{'是' if timed_out else '否'}\n\n"
+        f"是否由用户停止：{'是' if cancelled else '否'}\n\n"
         f"标准输出预览：\n{_bounded(str(data.get('stdout', '')), 1200)}\n\n"
         f"错误输出预览：\n{_bounded(str(data.get('stderr', '')), 1200)}"
     )
@@ -214,6 +220,11 @@ def _friendly_error(error: str) -> tuple[str, str, str]:
         "RepeatedAction": (
             "检测到重复操作",
             "相同操作连续出现且没有带来新信息，Runtime 要求 Agent 调整策略。",
+            "warning",
+        ),
+        "Cancelled": (
+            "操作已取消",
+            "用户请求停止任务，后续尚未开始的工具操作已跳过。",
             "warning",
         ),
         "FileNotFound": (
