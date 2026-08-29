@@ -19,17 +19,26 @@ from coding_agent.llm import LLMClient, ToolCall
 from coding_agent.tools.registry import ToolRegistry, create_tool_registry
 
 
-SYSTEM_PROMPT = """You are Mini Coding Agent, an autonomous programming assistant with access to the current workspace.
+SYSTEM_PROMPT = """You are Mini Coding Agent, an autonomous programming assistant operating under a bounded local runtime with access to the current workspace.
 Use the available tools to inspect the project, search text, create or edit UTF-8 files, and run non-interactive development commands.
-Work iteratively: observe tool results, decide the next useful action, and continue until you can answer the user's request or a runtime limit stops the task.
+Work iteratively using actual tool observations, and avoid repeating an action when it has not produced new information.
 Choose actions dynamically from the current conversation instead of following a fixed read-edit-run workflow.
 Before modifying an existing file, inspect the relevant code first.
 Use edit_file for existing files and write_file only for new files.
-Do not use shell operators, install packages, start interactive programs, or start background processes.
+Do not use shell operators, start interactive programs, or start background processes.
+Package installation, environment mutation, and direct destructive commands are blocked by the local runtime; use the existing project environment.
+If a tool reports RepeatedAction, CommandBlocked, or another structured error, change strategy instead of retrying the same request.
 Never claim that you inspected a local file unless you actually obtained its content through a tool.
 Never claim tests passed unless run_command actually produced evidence that they passed.
 A successful file edit does not imply that the code is correct.
-If a tool fails or a command exits unsuccessfully, treat the result as an observation and decide whether another action can make progress."""
+After modifying source code or project configuration, verify the latest changes before finishing.
+Use an available test, build, or syntax-check command after the most recent modification.
+If verification fails, continue repairing the project.
+Do not install packages only for verification; use the existing environment.
+If only a weaker verification such as syntax checking is available, state that limitation accurately.
+If a tool fails or a command exits unsuccessfully, treat the result as an observation and decide whether another action can make progress.
+When the task is complete, stop calling tools and return a concise final answer.
+Do not continue performing unrelated cleanup or additional exploration after the requested task has been completed."""
 
 
 def run_cli(
@@ -41,7 +50,7 @@ def run_cli(
     """运行具有自主工具循环的多轮命令行对话。"""
     workspace = (workspace_root or Path.cwd()).resolve()
     print("Mini Coding Agent")
-    print("Stage 5 - Autonomous agent loop")
+    print("Stage 7 - Verification and evaluation")
     print()
     _safe_print(f"Workspace: {workspace}")
     _safe_print(f"Max steps per task: {max_steps}")
@@ -66,6 +75,7 @@ def run_cli(
         max_steps=max_steps,
         on_tool_call=_print_tool_call,
         on_tool_result=_print_tool_result,
+        on_llm_retry=_print_llm_retry,
     )
 
     while True:
@@ -121,6 +131,13 @@ def _print_tool_call(step_number: int, tool_call: ToolCall) -> None:
     _safe_print(f"[step {step_number}] {_format_tool_trace(tool_call)}")
 
 
+def _print_llm_retry(retry_number: int, max_retries: int) -> None:
+    """输出不含请求正文或凭据的 LLM 重试摘要。"""
+    _safe_print(
+        f"[llm] transient error, retry {retry_number}/{max_retries}"
+    )
+
+
 def _print_tool_result(
     step_number: int,
     tool_call: ToolCall,
@@ -141,6 +158,10 @@ def _print_agent_result(result: AgentResult) -> None:
         print("Agent interrupted by user.")
     elif result.stop_reason == "llm_error":
         print("Agent stopped: LLM request failed.")
+    elif result.stop_reason == "no_progress":
+        print("Agent stopped: no meaningful progress detected.")
+    elif result.stop_reason == "verification_required":
+        print("Agent stopped: latest code changes still require verification.")
     else:
         print("Agent stopped: invalid model response.")
     _safe_print(result.content)
@@ -180,6 +201,10 @@ def _format_tool_result_trace(
 ) -> str:
     """构造不包含完整工具输出的结果摘要。"""
     if not result.get("success"):
+        if result.get("error") == "CommandBlocked":
+            return "[result] blocked by runtime policy"
+        if result.get("error") == "RepeatedAction":
+            return "[warning] repeated action detected"
         return f"[result] error={result.get('error', 'ToolExecutionError')}"
 
     data = result.get("data", {})

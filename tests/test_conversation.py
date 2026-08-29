@@ -25,6 +25,19 @@ class ConversationTests(unittest.TestCase):
             ["system", "user", "assistant"],
         )
 
+    def test_runtime_system_message_can_be_appended(self) -> None:
+        conversation = Conversation("Initial system")
+
+        conversation.add_system_message("Runtime reminder")
+
+        self.assertEqual(
+            conversation.messages,
+            [
+                {"role": "system", "content": "Initial system"},
+                {"role": "system", "content": "Runtime reminder"},
+            ],
+        )
+
     def test_add_tool_call_and_matching_tool_result(self) -> None:
         conversation = Conversation("System prompt")
         conversation.add_user_message("Read README")

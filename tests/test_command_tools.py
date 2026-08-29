@@ -10,6 +10,7 @@ from unittest.mock import patch
 from coding_agent.tools.command import (
     MAX_STDERR_CHARS,
     MAX_STDOUT_CHARS,
+    CommandPolicy,
     CommandTools,
 )
 from coding_agent.tools.filesystem import ToolError
@@ -139,6 +140,52 @@ class CommandToolsTests(unittest.TestCase):
             )
 
         self.assertEqual(result["stdout"].strip(), "None")
+
+    def test_package_environment_mutation_commands_are_blocked(self) -> None:
+        blocked_commands = [
+            ["pip", "install", "pytest"],
+            ["pip.exe", "uninstall", "pytest"],
+            [sys.executable, "-m", "pip", "install", "pytest"],
+            [sys.executable, "-I", "-m", "pip", "install", "pytest"],
+            ["conda", "install", "numpy"],
+            ["npm", "install"],
+            ["yarn", "add", "package"],
+            ["pnpm", "remove", "package"],
+        ]
+
+        for command in blocked_commands:
+            with self.subTest(command=command), self.assertRaises(ToolError) as raised:
+                self.tools.run_command(command)
+            self.assertEqual(raised.exception.error, "CommandBlocked")
+
+    def test_blocked_command_never_starts_subprocess(self) -> None:
+        with patch("coding_agent.tools.command.subprocess.run") as run_process:
+            with self.assertRaises(ToolError):
+                self.tools.run_command(["pip", "install", "pytest"])
+
+        run_process.assert_not_called()
+
+    def test_normal_development_commands_are_allowed_by_policy(self) -> None:
+        policy = CommandPolicy()
+        allowed_commands = [
+            [sys.executable, "-m", "pytest"],
+            [sys.executable, "-m", "unittest"],
+            ["npm", "test"],
+            ["npm", "run", "build"],
+            ["node", "script.js"],
+        ]
+
+        for command in allowed_commands:
+            with self.subTest(command=command):
+                self.assertTrue(policy.validate(command).allowed)
+
+    def test_direct_destructive_commands_are_blocked(self) -> None:
+        for executable in ("rm", "rmdir.exe", "del", "erase", "Remove-Item"):
+            with self.subTest(executable=executable), self.assertRaises(
+                ToolError
+            ) as raised:
+                self.tools.run_command([executable, "target.txt"])
+            self.assertEqual(raised.exception.error, "CommandBlocked")
 
 
 if __name__ == "__main__":

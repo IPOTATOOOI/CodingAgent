@@ -4,6 +4,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import httpx
+from openai import (
+    APIConnectionError,
+    AuthenticationError,
+    InternalServerError,
+    RateLimitError,
+)
+
 from coding_agent.config import Settings
 from coding_agent.llm import LLMClient, LLMError
 
@@ -89,6 +97,50 @@ class LLMClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMError, "neither text nor tool calls"):
             client.complete([{"role": "user", "content": "Hi"}])
+
+    @patch("coding_agent.llm.OpenAI")
+    def test_rate_limit_connection_and_server_errors_are_transient(
+        self, openai_class
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+        errors = [
+            RateLimitError(
+                "rate limit",
+                response=httpx.Response(429, request=request),
+                body=None,
+            ),
+            APIConnectionError(request=request),
+            InternalServerError(
+                "server error",
+                response=httpx.Response(500, request=request),
+                body=None,
+            ),
+        ]
+        client = LLMClient(Settings(api_key="test-key", model="test-model"))
+
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                openai_class.return_value.chat.completions.create.side_effect = error
+                with self.assertRaises(LLMError) as raised:
+                    client.complete([{"role": "user", "content": "Hi"}])
+                self.assertTrue(raised.exception.transient)
+
+    @patch("coding_agent.llm.OpenAI")
+    def test_authentication_error_is_permanent(self, openai_class) -> None:
+        request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+        openai_class.return_value.chat.completions.create.side_effect = (
+            AuthenticationError(
+                "invalid key",
+                response=httpx.Response(401, request=request),
+                body=None,
+            )
+        )
+        client = LLMClient(Settings(api_key="test-key", model="test-model"))
+
+        with self.assertRaises(LLMError) as raised:
+            client.complete([{"role": "user", "content": "Hi"}])
+
+        self.assertFalse(raised.exception.transient)
 
 
 if __name__ == "__main__":

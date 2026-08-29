@@ -1,4 +1,4 @@
-"""第五阶段命令行参数、轨迹和 Agent 委托测试。"""
+"""命令行参数、Reliability Trace 和 Agent 委托测试。"""
 
 import io
 from pathlib import Path
@@ -9,16 +9,34 @@ from coding_agent.cli import (
     SYSTEM_PROMPT,
     _format_tool_result_trace,
     _format_tool_trace,
+    _print_llm_retry,
     _safe_print,
     main,
     run_cli,
 )
 from coding_agent.llm import LLMError, LLMResponse, ToolCall
+from coding_agent.agent import AgentResult
 
 
 class CliTests(unittest.TestCase):
     def test_main_is_importable(self) -> None:
         self.assertTrue(callable(main))
+
+    def test_verification_required_result_is_displayed(self) -> None:
+        from coding_agent.cli import _print_agent_result
+
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            _print_agent_result(
+                AgentResult(
+                    "Verification is still required.",
+                    "verification_required",
+                    4,
+                    verification_status="unverified",
+                )
+            )
+
+        self.assertIn("latest code changes still require verification", output.getvalue())
 
     def test_safe_print_replaces_characters_unsupported_by_console(self) -> None:
         class AsciiStream(io.StringIO):
@@ -145,6 +163,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(read_summary, "[result] lines=1-10, total=20")
         self.assertEqual(error_summary, "[result] error=FileNotFound")
 
+    def test_reliability_results_have_explicit_trace(self) -> None:
+        call = ToolCall("call", "run_command", '{}')
+
+        self.assertEqual(
+            _format_tool_result_trace(
+                call,
+                {"success": False, "error": "CommandBlocked"},
+            ),
+            "[result] blocked by runtime policy",
+        )
+        self.assertEqual(
+            _format_tool_result_trace(
+                call,
+                {"success": False, "error": "RepeatedAction"},
+            ),
+            "[warning] repeated action detected",
+        )
+
+    def test_llm_retry_trace_does_not_include_error_details(self) -> None:
+        output = io.StringIO()
+
+        with patch("sys.stdout", output):
+            _print_llm_retry(1, 2)
+
+        self.assertEqual(output.getvalue(), "[llm] transient error, retry 1/2\n")
+
     def test_system_prompt_describes_dynamic_autonomous_loop(self) -> None:
         lowered = SYSTEM_PROMPT.lower()
 
@@ -152,7 +196,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("work iteratively", lowered)
         self.assertIn("choose actions dynamically", lowered)
         self.assertIn("never claim tests passed", lowered)
+        self.assertIn("verify the latest changes", lowered)
+        self.assertIn("do not install packages only for verification", lowered)
         self.assertIn("tool fails", lowered)
+        self.assertIn("repeatedaction", lowered)
+        self.assertIn("commandblocked", lowered)
+        self.assertIn("unrelated cleanup", lowered)
 
     def test_empty_input_does_not_call_llm(self) -> None:
         client = Mock()

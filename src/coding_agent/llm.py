@@ -5,6 +5,7 @@ from typing import Any
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AuthenticationError,
     NotFoundError,
@@ -19,6 +20,10 @@ from coding_agent.conversation import Message
 
 class LLMError(RuntimeError):
     """可安全展示给用户的 LLM 请求异常。"""
+
+    def __init__(self, message: str, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -67,11 +72,19 @@ class LLMClient:
         except AuthenticationError:
             raise LLMError("authentication error.") from None
         except RateLimitError:
-            raise LLMError("rate limit exceeded.") from None
+            raise LLMError("rate limit exceeded.", transient=True) from None
         except NotFoundError:
             raise LLMError("model or API endpoint was not found.") from None
         except (APIConnectionError, APITimeoutError):
-            raise LLMError("network connection or timeout error.") from None
+            raise LLMError(
+                "network connection or timeout error.", transient=True
+            ) from None
+        except APIStatusError as error:
+            if error.status_code >= 500:
+                raise LLMError("temporary server error.", transient=True) from None
+            raise LLMError(
+                "Please check your network and model configuration."
+            ) from None
         except OpenAIError:
             raise LLMError(
                 "Please check your network and model configuration."

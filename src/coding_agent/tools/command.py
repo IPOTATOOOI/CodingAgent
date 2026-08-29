@@ -1,7 +1,9 @@
 """受执行时间、输出大小和工作目录约束的本地命令工具。"""
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
+import re
 import subprocess
 import time
 from typing import Any
@@ -15,13 +17,98 @@ MAX_TIMEOUT_SECONDS = 120
 MAX_STDOUT_CHARS = 12_000
 MAX_STDERR_CHARS = 12_000
 AGENT_SECRET_NAMES = {"LLM_API_KEY"}
+PACKAGE_MUTATION_MESSAGE = (
+    "Package installation and environment mutation commands are disabled "
+    "by the local runtime policy."
+)
+DESTRUCTIVE_COMMAND_MESSAGE = (
+    "Direct destructive file-removal commands are disabled by the local runtime policy."
+)
+
+
+@dataclass(frozen=True)
+class PolicyResult:
+    """本地命令策略的授权结果。"""
+
+    allowed: bool
+    message: str = ""
+
+
+class CommandPolicy:
+    """阻止包环境修改和明显的直接删除命令。"""
+
+    PACKAGE_OPERATIONS = {
+        "pip": {"install", "uninstall"},
+        "conda": {"install", "remove", "uninstall"},
+        "mamba": {"install", "remove", "uninstall"},
+        "npm": {"install", "uninstall"},
+        "yarn": {"add", "remove", "install"},
+        "pnpm": {"add", "remove", "install", "uninstall"},
+    }
+    DESTRUCTIVE_EXECUTABLES = {"rm", "rmdir", "del", "erase", "remove-item"}
+
+    def validate(self, command: list[str]) -> PolicyResult:
+        """在子进程启动前检查一个参数数组表示的命令。"""
+        executable = self._normalize_executable(command[0])
+        arguments = [argument.casefold() for argument in command[1:]]
+
+        if executable in self.DESTRUCTIVE_EXECUTABLES:
+            return PolicyResult(False, DESTRUCTIVE_COMMAND_MESSAGE)
+
+        manager = self._package_manager_name(executable)
+        if manager is not None and arguments:
+            if arguments[0] in self.PACKAGE_OPERATIONS[manager]:
+                return PolicyResult(False, PACKAGE_MUTATION_MESSAGE)
+
+        if self._is_python_executable(executable):
+            for index in range(len(arguments) - 2):
+                if arguments[index] != "-m":
+                    continue
+                module = self._package_manager_name(arguments[index + 1])
+                if (
+                    module is not None
+                    and arguments[index + 2] in self.PACKAGE_OPERATIONS[module]
+                ):
+                    return PolicyResult(False, PACKAGE_MUTATION_MESSAGE)
+
+        return PolicyResult(True)
+
+    @staticmethod
+    def _normalize_executable(value: str) -> str:
+        """提取跨平台可执行文件名，并移除常见启动器后缀。"""
+        name = Path(value).name.casefold()
+        for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+            if name.endswith(suffix):
+                return name[: -len(suffix)]
+        return name
+
+    @staticmethod
+    def _package_manager_name(executable: str) -> str | None:
+        """识别允许带版本后缀的包管理器可执行文件名。"""
+        if re.fullmatch(r"pip(?:\d+(?:\.\d+)*)?", executable):
+            return "pip"
+        if executable in {"conda", "mamba", "npm", "yarn", "pnpm"}:
+            return executable
+        return None
+
+    @staticmethod
+    def _is_python_executable(executable: str) -> bool:
+        """识别 python、pythonw、py 及其版本化名称。"""
+        return executable == "py" or bool(
+            re.fullmatch(r"pythonw?(?:\d+(?:\.\d+)*)?", executable)
+        )
 
 
 class CommandTools:
     """提供不经过 Shell 的非交互式本地命令执行。"""
 
-    def __init__(self, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        workspace_root: Path,
+        policy: CommandPolicy | None = None,
+    ) -> None:
         self.workspace_root = workspace_root.resolve()
+        self.policy = policy or CommandPolicy()
 
     def run_command(
         self,
@@ -31,6 +118,9 @@ class CommandTools:
     ) -> dict[str, Any]:
         """运行一个参数数组表示的命令，并返回有界的执行结果。"""
         self._validate_arguments(command, cwd, timeout_seconds)
+        policy_result = self.policy.validate(command)
+        if not policy_result.allowed:
+            raise ToolError("CommandBlocked", policy_result.message)
         resolved_cwd = resolve_workspace_path(self.workspace_root, cwd)
         if not resolved_cwd.exists():
             raise ToolError(

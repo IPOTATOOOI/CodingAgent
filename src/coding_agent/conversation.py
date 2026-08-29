@@ -22,6 +22,10 @@ class Conversation:
         """向历史记录追加一条用户消息。"""
         self._messages.append({"role": "user", "content": content})
 
+    def add_system_message(self, content: str) -> None:
+        """追加由本地 Runtime 产生的系统约束消息。"""
+        self._messages.append({"role": "system", "content": content})
+
     def add_assistant_message(self, content: str) -> None:
         """向历史记录追加一条助手回复。"""
         self._messages.append({"role": "assistant", "content": content})

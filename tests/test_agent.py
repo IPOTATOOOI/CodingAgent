@@ -1,4 +1,4 @@
-"""第五阶段自主 Agent Loop 测试。"""
+"""自主 Agent Loop 与 Stage 6 Reliability 集成测试。"""
 
 import json
 from pathlib import Path
@@ -8,8 +8,10 @@ import unittest
 from unittest.mock import Mock
 
 from coding_agent.agent import Agent, MAX_TOOL_CALLS_PER_STEP
+from coding_agent.context import ContextManager
 from coding_agent.conversation import Conversation
 from coding_agent.llm import LLMError, LLMResponse, ToolCall
+from coding_agent.reliability import LLMRetryPolicy
 from coding_agent.tools.registry import create_tool_registry
 
 
@@ -72,6 +74,10 @@ class AgentTests(unittest.TestCase):
             workspace = Path(directory)
             target = workspace / "calculator.py"
             target.write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+            (workspace / "test_calculator.py").write_text(
+                "from calculator import add\nassert add(2, 3) == 5\n",
+                encoding="utf-8",
+            )
             client = Mock()
             client.complete.side_effect = [
                 LLMResponse(
@@ -104,11 +110,7 @@ class AgentTests(unittest.TestCase):
                                 {
                                     "command": [
                                         sys.executable,
-                                        "-c",
-                                        (
-                                            "from calculator import add; "
-                                            "raise SystemExit(0 if add(2, 3) == 5 else 1)"
-                                        ),
+                                        "test_calculator.py",
                                     ]
                                 }
                             ),
@@ -145,15 +147,22 @@ class AgentTests(unittest.TestCase):
             workspace = Path(directory)
             target = workspace / "calculator.py"
             target.write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+            (workspace / "test_calculator.py").write_text(
+                "from calculator import add\nassert add(2, 3) == 5\n",
+                encoding="utf-8",
+            )
             command = {
                 "command": [
                     sys.executable,
-                    "-c",
-                    (
-                        "from pathlib import Path; "
-                        "source = Path('calculator.py').read_text(encoding='utf-8'); "
-                        "raise SystemExit(0 if 'return a + b' in source else 1)"
-                    ),
+                    "test_calculator.py",
+                ]
+            }
+            verification_command = {
+                "command": [
+                    sys.executable,
+                    "-m",
+                    "py_compile",
+                    "calculator.py",
                 ]
             }
             client = Mock()
@@ -184,7 +193,13 @@ class AgentTests(unittest.TestCase):
                 ),
                 LLMResponse(
                     None,
-                    [ToolCall("call-4", "run_command", json.dumps(command))],
+                    [
+                        ToolCall(
+                            "call-4",
+                            "run_command",
+                            json.dumps(verification_command),
+                        )
+                    ],
                 ),
                 LLMResponse("The failing implementation is repaired.", []),
             ]
@@ -370,6 +385,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "llm_error")
         self.assertEqual(result.steps, 0)
         self.assertIn("network error", result.content)
+        self.assertEqual(client.complete.call_count, 1)
 
     def test_keyboard_interrupt_returns_controlled_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -388,6 +404,279 @@ class AgentTests(unittest.TestCase):
         for invalid_value in (0, 51):
             with self.subTest(max_steps=invalid_value), self.assertRaises(ValueError):
                 Agent(Mock(), conversation, registry, max_steps=invalid_value)
+
+    def test_transient_llm_error_retries_without_adding_agent_step(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client = Mock()
+            client.complete.side_effect = [
+                LLMError("temporary", transient=True),
+                LLMResponse("Recovered", []),
+            ]
+            conversation = Conversation("System prompt")
+            retry_callback = Mock()
+            agent = Agent(
+                client,
+                conversation,
+                create_tool_registry(Path(directory)),
+                retry_policy=LLMRetryPolicy(delays=(0, 0), sleeper=Mock()),
+                on_llm_retry=retry_callback,
+            )
+
+            result = agent.run("Hello")
+
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertEqual(result.steps, 1)
+        self.assertEqual(client.complete.call_count, 2)
+        retry_callback.assert_called_once_with(1, 2)
+
+    def test_transient_llm_errors_stop_after_retry_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client = Mock()
+            client.complete.side_effect = LLMError("temporary", transient=True)
+            agent = Agent(
+                client,
+                Conversation("System prompt"),
+                create_tool_registry(Path(directory)),
+                retry_policy=LLMRetryPolicy(delays=(0, 0), sleeper=Mock()),
+            )
+
+            result = agent.run("Hello")
+
+        self.assertEqual(result.stop_reason, "llm_error")
+        self.assertEqual(result.steps, 0)
+        self.assertEqual(client.complete.call_count, 3)
+
+    def test_repeated_action_observation_allows_strategy_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "a.py").write_text("target = 1\n", encoding="utf-8")
+            repeated_calls = [
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            f"call-{index}",
+                            "read_file",
+                            '{"path":"a.py"}',
+                        )
+                    ],
+                )
+                for index in range(1, 4)
+            ]
+            client = Mock()
+            client.complete.side_effect = [
+                *repeated_calls,
+                LLMResponse(
+                    None,
+                    [ToolCall("call-4", "search_text", '{"query":"target"}')],
+                ),
+                LLMResponse("Changed strategy successfully.", []),
+            ]
+            agent, conversation = self._create_agent(client, workspace)
+
+            result = agent.run("Find target")
+
+        tool_results = [
+            json.loads(message["content"])
+            for message in conversation.messages
+            if message["role"] == "tool"
+        ]
+        self.assertEqual(tool_results[2]["error"], "RepeatedAction")
+        self.assertTrue(tool_results[3]["success"])
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertEqual(result.steps, 5)
+
+    def test_persistent_repeated_action_stops_with_no_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "a.py").write_text("value = 1\n", encoding="utf-8")
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            f"call-{index}",
+                            "read_file",
+                            '{"path":"a.py"}',
+                        )
+                    ],
+                )
+                for index in range(1, 13)
+            ]
+            agent, _ = self._create_agent(client, workspace)
+
+            result = agent.run("Keep reading")
+
+        self.assertEqual(result.stop_reason, "no_progress")
+        self.assertEqual(result.steps, 5)
+        self.assertEqual(client.complete.call_count, 5)
+
+    def test_blocked_install_can_recover_with_existing_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-1",
+                            "run_command",
+                            '{"command":["pip","install","pytest"]}',
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "call-2",
+                            "run_command",
+                            json.dumps(
+                                {"command": [sys.executable, "-c", "print('ok')"]}
+                            ),
+                        )
+                    ],
+                ),
+                LLMResponse("Used the existing environment.", []),
+            ]
+            agent, conversation = self._create_agent(client, workspace)
+
+            result = agent.run("Run checks")
+
+        results = [
+            json.loads(message["content"])
+            for message in conversation.messages
+            if message["role"] == "tool"
+        ]
+        self.assertEqual(results[0]["error"], "CommandBlocked")
+        self.assertEqual(results[1]["data"]["exit_code"], 0)
+        self.assertEqual(result.stop_reason, "completed")
+
+    def test_llm_receives_compact_view_while_conversation_remains_full(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            conversation = Conversation("System prompt")
+            for index in range(4):
+                conversation.add_user_message(f"Old task {index}")
+                conversation.add_assistant_tool_calls(
+                    None,
+                    [
+                        ToolCall(
+                            f"old-{index}",
+                            "read_file",
+                            json.dumps({"path": f"file-{index}.py"}),
+                        )
+                    ],
+                )
+                conversation.add_tool_result(
+                    f"old-{index}",
+                    json.dumps(
+                        {
+                            "success": True,
+                            "data": {"content": "x" * 4000},
+                        }
+                    ),
+                )
+            full_before = conversation.messages
+            client = Mock()
+            client.complete.return_value = LLMResponse("Done", [])
+            context_manager = ContextManager(max_chars=1800, recent_groups=1)
+            agent = Agent(
+                client,
+                conversation,
+                create_tool_registry(Path(directory)),
+                context_manager=context_manager,
+            )
+
+            result = agent.run("Current task")
+
+        llm_messages = client.complete.call_args.args[0]
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertLess(len(llm_messages), len(conversation.messages))
+        self.assertEqual(conversation.messages[:-2], full_before)
+        self.assertLess(
+            context_manager.last_stats.output_chars,
+            context_manager.last_stats.input_chars,
+        )
+
+    def test_multi_repair_with_repeated_command_remains_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "state.txt").write_text("first=bad\nsecond=bad\n", encoding="utf-8")
+            check_command = {
+                "command": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "value=Path('state.txt').read_text(); "
+                        "raise SystemExit(0 if 'first=good' in value and "
+                        "'second=good' in value else 1)"
+                    ),
+                ]
+            }
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [ToolCall("run-1", "run_command", json.dumps(check_command))],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "edit-1",
+                            "edit_file",
+                            json.dumps(
+                                {
+                                    "path": "state.txt",
+                                    "old_text": "first=bad",
+                                    "new_text": "first=good",
+                                }
+                            ),
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    None,
+                    [ToolCall("run-2", "run_command", json.dumps(check_command))],
+                ),
+                LLMResponse(
+                    None,
+                    [
+                        ToolCall(
+                            "edit-2",
+                            "edit_file",
+                            json.dumps(
+                                {
+                                    "path": "state.txt",
+                                    "old_text": "second=bad",
+                                    "new_text": "second=good",
+                                }
+                            ),
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    None,
+                    [ToolCall("run-3", "run_command", json.dumps(check_command))],
+                ),
+                LLMResponse("Both repairs passed.", []),
+            ]
+            agent, conversation = self._create_agent(client, workspace)
+
+            result = agent.run("Repair both failures")
+
+        command_results = [
+            json.loads(message["content"])["data"]["exit_code"]
+            for message in conversation.messages
+            if message["role"] == "tool"
+            and json.loads(message["content"]).get("data", {}).get("command")
+        ]
+        self.assertEqual(command_results, [1, 1, 0])
+        self.assertEqual(result.stop_reason, "completed")
+        self.assertEqual(result.steps, 6)
 
 
 if __name__ == "__main__":
