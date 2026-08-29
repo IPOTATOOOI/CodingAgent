@@ -20,7 +20,7 @@ from coding_agent.verification import (
 )
 
 
-DEFAULT_MAX_STEPS = 12
+DEFAULT_MAX_STEPS = 20
 MIN_MAX_STEPS = 1
 MAX_MAX_STEPS = 50
 MAX_TOOL_CALLS_PER_STEP = 8
@@ -34,6 +34,7 @@ If verification fails, continue repairing the project."""
 
 ToolCallCallback = Callable[[int, ToolCall], None]
 ToolResultCallback = Callable[[int, ToolCall, dict[str, Any]], None]
+CancellationCallback = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class Agent:
         on_tool_call: ToolCallCallback | None = None,
         on_tool_result: ToolResultCallback | None = None,
         on_llm_retry: RetryCallback | None = None,
+        should_cancel: CancellationCallback | None = None,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(
@@ -82,6 +84,7 @@ class Agent:
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         self.on_llm_retry = on_llm_retry
+        self.should_cancel = should_cancel
 
     def run(self, user_input: str) -> AgentResult:
         """运行一个有最大步数边界的自主任务。"""
@@ -119,6 +122,8 @@ class Agent:
 
         try:
             for step_number in range(1, self.max_steps + 1):
+                if self._cancellation_requested():
+                    return build_result("Agent task was interrupted.", "interrupted")
                 try:
                     context = self.context_manager.build_context(
                         self.conversation.messages
@@ -132,6 +137,10 @@ class Agent:
                     )
                 except LLMError as error:
                     return build_result(f"LLM request failed: {error}", "llm_error")
+
+                # LLM 请求无法被本地 Event 强制打断，但返回后、写入对话前可以安全停止。
+                if self._cancellation_requested():
+                    return build_result("Agent task was interrupted.", "interrupted")
 
                 completed_steps = step_number
                 if response.tool_calls:
@@ -218,3 +227,7 @@ class Agent:
             "Maximum agent steps reached before completion.",
             "max_steps",
         )
+
+    def _cancellation_requested(self) -> bool:
+        """在不影响 CLI 默认行为的前提下查询协作式取消状态。"""
+        return self.should_cancel is not None and self.should_cancel()

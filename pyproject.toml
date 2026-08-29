@@ -4,17 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-coding-agent"
-version = "0.8.0"
+version = "0.9.0"
 description = "A lightweight coding agent implemented from scratch."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0",
+    "PySide6>=6.8",
     "python-dotenv>=1.0",
 ]
 
 [project.scripts]
 coding-agent = "coding_agent.cli:main"
+coding-agent-gui = "coding_agent.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

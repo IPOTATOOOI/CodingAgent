@@ -217,7 +217,14 @@ class FilesystemToolsTests(unittest.TestCase):
 
         self.assertEqual(
             result,
-            {"path": "src/greeting.py", "modified": True, "replacements": 1},
+            {
+                "path": "src/greeting.py",
+                "modified": True,
+                "replacements": 1,
+                "start_line": 2,
+                "old_end_line": 2,
+                "new_end_line": 2,
+            },
         )
         self.assertEqual(
             target.read_bytes(),

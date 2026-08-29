@@ -264,6 +264,10 @@ class FilesystemTools:
                 "Provide a larger unique context.",
             )
 
+        match_index = content.index(old_text)
+        start_line = content.count("\n", 0, match_index) + 1
+        old_line_count = max(1, len(old_text.splitlines()))
+        new_line_count = len(new_text.splitlines())
         updated_content = content.replace(old_text, new_text, 1)
         encoded_content = updated_content.encode("utf-8")
         if len(encoded_content) > MAX_FILE_BYTES:
@@ -276,6 +280,11 @@ class FilesystemTools:
             "path": self._relative_path(target),
             "modified": True,
             "replacements": 1,
+            "start_line": start_line,
+            "old_end_line": start_line + old_line_count - 1,
+            "new_end_line": (
+                start_line + new_line_count - 1 if new_line_count else start_line - 1
+            ),
         }
 
     def _iter_search_files(self, target: Path) -> Iterator[Path]:

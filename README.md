@@ -4,7 +4,7 @@ A lightweight coding agent implemented from scratch.
 
 ## Current Status
 
-Stage 7: Verification and evaluation.
+Stage 8: PySide6 desktop GUI over the existing verified Agent Runtime.
 
 The project currently supports:
 
@@ -35,6 +35,7 @@ The project currently supports:
 - Execution-grounded completion verification for supported code/config changes
 - Mutation generation tracking and bounded runtime verification reminders
 - A six-task evaluation runner with Agent-invisible independent verifiers
+- A PySide6 desktop GUI that reuses the existing Agent Runtime
 
 It does not yet support:
 
@@ -52,6 +53,9 @@ Python >= 3.10
 ```bash
 pip install -e .
 ```
+
+PySide6 是桌面界面的运行依赖，会随项目一起安装。GUI 和 CLI 使用同一套
+Agent Runtime、LLM 配置及 Workspace 安全边界。
 
 ## Configuration
 
@@ -75,18 +79,56 @@ The `.env` file is ignored by Git and must never be committed.
 
 ## Run
 
+### Desktop GUI
+
 ```bash
-python -m coding_agent --workspace . --max-steps 12
+python -m coding_agent.gui --workspace . --max-steps 20
+```
+
+安装项目后也可以使用：
+
+```bash
+coding-agent-gui --workspace . --max-steps 20
+```
+
+GUI 采用适合演示 Autonomous Loop 的三栏结构：
+
+- 左侧 `Project` 使用 Qt 文件系统模型浏览当前 Workspace；双击受支持的 UTF-8
+  文本文件可进行只读、有大小限制的预览。
+- 中间 `Conversation` 使用右侧用户气泡、左侧 Agent 气泡和中性 Runtime 提示块，
+  Agent Final Response 支持常见 Markdown 标题、列表、粗体和代码格式，并提供多行
+  任务输入、Run、Stop 和 Clear 操作。
+- 右侧 `Agent Activity / Execution Trace` 以面向用户的时间线解释每一步在做什么、
+  执行结果意味着什么，以及 Agent 为什么继续或停止。例如“运行项目测试 → 测试失败，
+  继续定位和修复”。Read、Search、List、Create、Edit、Run 等底层工具标签仍会保留；
+  真实命令、参数、退出码和有界 stdout/stderr 放在点击详情中，不会把完整文件内容或
+  无限输出直接塞进主时间线。
+- 成功的 `edit_file` 步骤会显示文件路径、准确修改行号以及有界的 `- 修改前 / + 修改后`
+  Diff；点击步骤可以查看更完整的 Unified Diff。失败的编辑不会展示为已发生的修改。
+- 底部状态栏显示 Agent 状态、步数、Verification、工具调用数量和耗时。
+- 顶部太阳/月亮图标可以即时切换亮色和暗色主题，不会清空当前会话。
+
+LLM 请求和 Agent Loop 在 `QThread` Worker 中执行，主线程只处理 Qt 界面更新。
+Stop 使用协作式取消：设置线程安全的取消事件，Agent 会在当前 LLM 请求或当前一批
+Tool Calls 返回后的安全步骤边界停止。它不会强制终止正在运行的 Python 线程或子进程。
+
+选择 Workspace 只会刷新文件树并为下一次任务创建相应的 Tool Registry；文件读写和
+命令执行仍通过现有 Runtime 的规范路径检查，GUI 不会绕过 Workspace Boundary。
+
+### Command-line interface
+
+```bash
+python -m coding_agent --workspace . --max-steps 20
 ```
 
 or:
 
 ```bash
-coding-agent --workspace . --max-steps 12
+coding-agent --workspace . --max-steps 20
 ```
 
 `--max-steps` limits the number of LLM responses in one user task. Its default is
-12 and its accepted range is 1 through 50. Reaching the limit stops immediately
+20 and its accepted range is 1 through 50. Reaching the limit stops immediately
 without making an additional LLM request.
 
 The workspace defines the root directory that the file tools may inspect or modify.
@@ -278,7 +320,7 @@ Exiting Mini Coding Agent.
 You can try this flow without touching the agent's own source tree:
 
 ```bash
-python -m coding_agent --workspace examples/demo_project --max-steps 12
+python -m coding_agent --workspace examples/demo_project --max-steps 20
 ```
 
 Stage 7 can use a failed execution result to choose further inspection, editing, and

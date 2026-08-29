@@ -12,10 +12,26 @@ from coding_agent.context import ContextManager
 from coding_agent.conversation import Conversation
 from coding_agent.llm import LLMError, LLMResponse, ToolCall
 from coding_agent.reliability import LLMRetryPolicy
-from coding_agent.tools.registry import create_tool_registry
+from coding_agent.tools.registry import ToolRegistry, create_tool_registry
 
 
 class AgentTests(unittest.TestCase):
+    def test_cancellation_before_first_step_does_not_call_llm(self) -> None:
+        client = Mock()
+        conversation = Conversation("system")
+        agent = Agent(
+            llm_client=client,
+            conversation=conversation,
+            tool_registry=ToolRegistry(),
+            should_cancel=lambda: True,
+        )
+
+        result = agent.run("task")
+
+        self.assertEqual(result.stop_reason, "interrupted")
+        self.assertEqual(result.steps, 0)
+        client.complete.assert_not_called()
+
     def _create_agent(
         self,
         client: Mock,
