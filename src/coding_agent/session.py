@@ -21,10 +21,46 @@ DEFAULT_MAX_SESSIONS = 20
 DEFAULT_RECENT_GROUPS = 12
 SESSION_METADATA_RESERVE_BYTES = 4096
 STALE_TEMP_SECONDS = 24 * 60 * 60
+MAX_RUN_CONTENT_CHARS = 20_000
+KNOWN_STOP_REASONS = {
+    "completed",
+    "max_steps",
+    "interrupted",
+    "invalid_response",
+    "llm_error",
+    "no_progress",
+    "verification_required",
+    "worker_error",
+}
+KNOWN_VERIFICATION_STATUSES = {"not_required", "unverified", "failed", "verified"}
 
 
 class SessionTooLargeError(ValueError):
     """会话在协议安全压缩后仍然超过磁盘存储硬限制。"""
+
+
+def _normalize_last_run(value: Any) -> dict[str, Any] | None:
+    """只保留可安全恢复和展示的最后一次运行摘要字段。"""
+    if not isinstance(value, dict):
+        return None
+    stop_reason = value.get("stop_reason")
+    verification_status = value.get("verification_status")
+    if stop_reason not in KNOWN_STOP_REASONS:
+        return None
+    if verification_status not in KNOWN_VERIFICATION_STATUSES:
+        verification_status = "not_required"
+
+    normalized: dict[str, Any] = {
+        "stop_reason": stop_reason,
+        "verification_status": verification_status,
+    }
+    for name in ("steps", "tool_calls"):
+        item = value.get(name, 0)
+        normalized[name] = item if isinstance(item, int) and item >= 0 else 0
+    content = value.get("content", "")
+    if isinstance(content, str) and content:
+        normalized["content"] = content[:MAX_RUN_CONTENT_CHARS]
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -36,6 +72,7 @@ class SessionSnapshot:
     messages: list[Message]
     updated_at: str
     compacted: bool = False
+    last_run: dict[str, Any] | None = None
 
     def to_conversation(self) -> Conversation:
         return Conversation.from_messages(self.messages)
@@ -84,12 +121,14 @@ class SessionStore:
         conversation: Conversation,
         workspace: Path,
         model: str,
+        last_run: dict[str, Any] | None = None,
     ) -> Path:
         """从 Conversation 副本原子写入会话。"""
         return self.save_messages(
             conversation.messages,
             workspace,
             model,
+            last_run,
         )
 
     def save_messages(
@@ -97,6 +136,7 @@ class SessionStore:
         messages: list[Message],
         workspace: Path,
         model: str,
+        last_run: dict[str, Any] | None = None,
     ) -> Path:
         """保存消息快照；超限时按协议组压缩，仍超限则拒绝写入。"""
         target = self.path_for(workspace)
@@ -110,6 +150,7 @@ class SessionStore:
             "messages": validated_messages,
             "updated_at": updated_at,
             "storage": {"compacted": False},
+            "last_run": _normalize_last_run(last_run),
         }
         serialized = self._serialize(payload)
         if len(serialized) > self.max_bytes:
@@ -192,6 +233,7 @@ class SessionStore:
                 if isinstance(storage, dict)
                 else False
             ),
+            last_run=_normalize_last_run(payload.get("last_run")),
         )
 
     def delete(self, workspace: Path) -> bool:

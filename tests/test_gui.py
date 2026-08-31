@@ -15,7 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QStyleOptionSpinBox
 
 from coding_agent.config import Settings
-from coding_agent.agent import DEFAULT_MAX_STEPS
+from coding_agent.agent import AgentResult, DEFAULT_MAX_STEPS
 from coding_agent.events import RuntimeEvent, RuntimeEventKind
 from coding_agent.gui.app import main as gui_main
 from coding_agent.gui.main_window import (
@@ -197,6 +197,57 @@ class GuiTests(unittest.TestCase):
         displayed = window.conversation_view.toPlainText()
         self.assertIn("Restore me", displayed)
         self.assertIn("Restored answer", displayed)
+        self.assertIn("完成状态未知", displayed)
+
+    def test_unverified_result_is_not_presented_as_task_completion(self) -> None:
+        window = self._window()
+
+        window._on_agent_completed(
+            AgentResult(
+                content="Implemented, but verification is still missing.",
+                stop_reason="verification_required",
+                steps=13,
+                tool_calls=10,
+                verification_status="unverified",
+                verification_reminders=5,
+            )
+        )
+
+        displayed = window.conversation_view.toPlainText()
+        self.assertEqual(window.agent_status.text(), "Agent: Needs Verification")
+        self.assertIn("未验证草稿", displayed)
+        self.assertIn("不是完成结果", displayed)
+        self.assertNotIn("AGENT · 最终回答", displayed)
+
+    def test_unverified_session_restores_run_state_and_draft(self) -> None:
+        from coding_agent.conversation import Conversation
+
+        conversation = Conversation("System")
+        conversation.add_user_message("Build the app")
+        self.session_store.save(
+            conversation,
+            self.workspace,
+            "test-model",
+            {
+                "stop_reason": "verification_required",
+                "steps": 13,
+                "tool_calls": 10,
+                "verification_status": "unverified",
+                "content": "Unverified generated result",
+            },
+        )
+
+        window = self._window()
+        displayed = window.conversation_view.toPlainText()
+
+        self.assertIn("未验证草稿", displayed)
+        self.assertIn("Unverified generated result", displayed)
+        self.assertIn("任务没有完成", displayed)
+        self.assertNotIn("AGENT · 最终回答", displayed)
+        self.assertEqual(window.agent_status.text(), "Agent: Needs Verification")
+        self.assertEqual(window.steps_status.text(), "Steps: 13 / 20")
+        self.assertEqual(window.tools_status.text(), "Tool Calls: 10")
+        self.assertEqual(window.verification_status.text(), "Verification: 等待验证")
 
     def test_auto_save_can_be_disabled(self) -> None:
         window = self._window()
@@ -210,9 +261,9 @@ class GuiTests(unittest.TestCase):
 
     def test_session_save_runs_outside_gui_thread(self) -> None:
         class SlowSessionStore(SessionStore):
-            def save_messages(self, messages, workspace, model):
+            def save_messages(self, messages, workspace, model, last_run=None):
                 sleep(0.2)
-                return super().save_messages(messages, workspace, model)
+                return super().save_messages(messages, workspace, model, last_run)
 
         slow_store = SlowSessionStore(self.workspace / ".slow-sessions")
         window = self._window(session_store=slow_store)
@@ -320,6 +371,57 @@ class GuiTests(unittest.TestCase):
         self.assertIn("读取较多", window.activity_list.item(0).text())
         self.assertIn("12 次", window.activity_list.item(0).text())
         self.assertIn("采取具体行动", window.current_action_label.text())
+
+    def test_verification_reminder_explains_why_agent_continues(self) -> None:
+        window = self._window()
+
+        window._on_runtime_event(
+            RuntimeEvent(
+                RuntimeEventKind.VERIFICATION_CHANGED,
+                step=13,
+                payload={
+                    "status": "unverified",
+                    "reminder": 3,
+                    "max_reminders": 8,
+                    "pending_paths": ["script.js", "server.js"],
+                },
+            )
+        )
+
+        window._on_runtime_event(
+            RuntimeEvent(
+                RuntimeEventKind.VERIFICATION_CHANGED,
+                step=14,
+                payload={
+                    "status": "unverified",
+                    "reminder": 4,
+                    "max_reminders": 8,
+                    "pending_paths": ["server.js"],
+                },
+            )
+        )
+
+        self.assertEqual(window.activity_list.count(), 1)
+        self.assertIn("代码还没有验证", window.activity_list.item(0).text())
+        self.assertIn("4/8", window.activity_list.item(0).text())
+        self.assertIn("server.js", window.activity_list.item(0).text())
+        self.assertIn("任务尚未完成", window.current_action_label.text())
+
+        window._on_runtime_event(
+            RuntimeEvent(
+                RuntimeEventKind.VERIFICATION_CHANGED,
+                step=15,
+                payload={
+                    "status": "verified",
+                    "outcome": "verified",
+                    "covered_paths": ["server.js"],
+                    "pending_paths": [],
+                },
+            )
+        )
+
+        self.assertEqual(window.activity_list.count(), 1)
+        self.assertIn("警告已经解决", window.activity_list.item(0).text())
 
     def test_worker_failure_restores_controls(self) -> None:
         window = self._window(lambda settings: _FailingClient())

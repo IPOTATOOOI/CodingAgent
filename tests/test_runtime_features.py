@@ -146,7 +146,19 @@ class RuntimeFeatureTests(unittest.TestCase):
             conversation.add_assistant_message("Done")
             store = SessionStore(root / "sessions")
 
-            path = store.save(conversation, workspace, "test-model")
+            last_run = {
+                "stop_reason": "verification_required",
+                "steps": 7,
+                "tool_calls": 3,
+                "verification_status": "unverified",
+                "content": "This is only a draft.",
+            }
+            path = store.save(
+                conversation,
+                workspace,
+                "test-model",
+                last_run,
+            )
             snapshot = store.load(workspace)
 
             self.assertTrue(path.exists())
@@ -154,6 +166,7 @@ class RuntimeFeatureTests(unittest.TestCase):
             assert snapshot is not None
             self.assertEqual(snapshot.model, "test-model")
             self.assertEqual(snapshot.messages, conversation.messages)
+            self.assertEqual(snapshot.last_run, last_run)
             self.assertNotIn("api", json.loads(path.read_text(encoding="utf-8")))
             self.assertTrue(store.delete(workspace))
             self.assertIsNone(store.load(workspace))

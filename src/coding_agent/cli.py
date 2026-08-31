@@ -40,6 +40,7 @@ If verification fails, continue repairing the project.
 Do not install packages only for verification; use the existing environment.
 Do not probe several runtimes or package tools without a specific need; prefer evidence already available from the project and prior command results.
 If only a weaker verification such as syntax checking is available, state that limitation accurately.
+For browser-only projects, keep core logic testable outside the DOM when practical, run focused Node tests, and do not describe a syntax check as proof that browser interaction works.
 After a recognized verification command succeeds and the requested work is complete, return the final answer immediately without extra inspection or cleanup.
 If a tool fails or a command exits unsuccessfully, treat the result as an observation and decide whether another action can make progress.
 When the task is complete, stop calling tools and return a concise final answer.
@@ -114,7 +115,18 @@ def run_cli(
             try:
                 client_model = getattr(client, "_model", "")
                 model = client_model if isinstance(client_model, str) else ""
-                store.save(conversation, workspace, model)
+                store.save(
+                    conversation,
+                    workspace,
+                    model,
+                    {
+                        "stop_reason": result.stop_reason,
+                        "steps": result.steps,
+                        "tool_calls": result.tool_calls,
+                        "verification_status": result.verification_status,
+                        "content": result.content,
+                    },
+                )
             except (OSError, ValueError) as error:
                 _safe_print(f"Session save failed: {error}")
 

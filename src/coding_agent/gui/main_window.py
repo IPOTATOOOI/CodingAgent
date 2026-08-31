@@ -99,7 +99,7 @@ STOP_REASON_TEXT = {
     ),
     "verification_required": (
         "最新代码尚未通过验证",
-        "Agent 修改了代码，但没有在限制步数内取得成功的测试或检查结果。",
+        "Agent 多次尝试结束任务，但仍没有取得 Runtime 能确认的测试或检查结果。",
     ),
     "llm_error": (
         "模型请求失败",
@@ -144,7 +144,9 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._trace_items: dict[str, QListWidgetItem] = {}
         self._trace_presentations: dict[str, TracePresentation] = {}
+        self._verification_guidance_item: QListWidgetItem | None = None
         self._last_verification = VERIFICATION_NOT_REQUIRED
+        self._last_run_state: dict[str, object] | None = None
         self._stream_buffer = ""
         self._started_at: float | None = None
         self._close_pending = False
@@ -157,7 +159,6 @@ class MainWindow(QMainWindow):
         self._build_ui(max_steps)
         self._apply_style()
         self.load_workspace(self.workspace)
-        self._set_agent_state("Ready")
 
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
@@ -375,8 +376,8 @@ class MainWindow(QMainWindow):
             self.activity_list.clear()
             self._trace_items.clear()
             self._trace_presentations.clear()
+            self._verification_guidance_item = None
             self.load_workspace(Path(selected))
-            self._reset_status_metrics()
 
     def preview_index(self, index: QModelIndex) -> None:
         path = Path(self.file_model.filePath(index))
@@ -429,7 +430,9 @@ class MainWindow(QMainWindow):
         self.activity_list.clear()
         self._trace_items.clear()
         self._trace_presentations.clear()
+        self._verification_guidance_item = None
         self._last_verification = VERIFICATION_NOT_REQUIRED
+        self._last_run_state = None
         self._stream_buffer = ""
         self._set_verification(VERIFICATION_NOT_REQUIRED)
         self._set_running(True)
@@ -450,7 +453,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.runtime_event.connect(self._on_runtime_event)
-        worker.completed.connect(self._on_agent_completed)
+        worker.result_ready.connect(self._on_agent_completed)
         worker.failed.connect(self._on_agent_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -526,6 +529,62 @@ class MainWindow(QMainWindow):
             self.current_action_label.setText(
                 "已提醒 Agent：停止重复查看并采取具体行动"
             )
+        elif event.kind == RuntimeEventKind.VERIFICATION_CHANGED:
+            reminder = int(payload.get("reminder", 0))
+            maximum = int(payload.get("max_reminders", 0))
+            outcome = str(payload.get("outcome", ""))
+            pending_paths = payload.get("pending_paths", [])
+            pending = (
+                "、".join(str(path) for path in pending_paths[:6])
+                if isinstance(pending_paths, list)
+                else ""
+            )
+            if reminder > 0:
+                progress = f"{reminder}/{maximum}" if maximum > 0 else str(reminder)
+                title = "Agent 想结束，但代码还没有验证"
+                summary = (
+                    f"Runtime 已拒绝这次完成请求（验证提醒 {progress}）。"
+                    f"仍待验证：{pending or '请查看详情'}。"
+                )
+                self.current_action_label.setText(
+                    f"验证提醒 {progress}：任务尚未完成，Agent 将继续处理"
+                )
+            elif outcome == "partial":
+                title = "部分文件已经验证"
+                summary = f"这次检查有效，但仍待验证：{pending or '请查看详情'}。"
+            elif outcome == "no_coverage":
+                title = "检查命令没有覆盖待验证文件"
+                summary = (
+                    f"Agent 选错了检查目标；仍待验证：{pending or '请查看详情'}。"
+                )
+            elif (
+                outcome == "verified"
+                and self._verification_guidance_item is not None
+            ):
+                title = "先前的验证警告已经解决"
+                summary = "所有待验证代码文件都已获得成功执行证据。"
+            elif pending and self._verification_guidance_item is not None:
+                title = "待验证文件范围已经更新"
+                summary = f"当前仍待验证：{pending}。"
+            else:
+                return
+            text = f"{title}  [VERIFY]\n{summary}"
+            tone = "success" if outcome == "verified" else "warning"
+            if self._verification_guidance_item is None:
+                self._verification_guidance_item = self._add_activity(
+                    "VERIFY", title, summary, str(payload), tone
+                )
+            else:
+                self._verification_guidance_item.setText(text)
+                self._verification_guidance_item.setData(
+                    Qt.ItemDataRole.UserRole, str(payload)
+                )
+                self._verification_guidance_item.setForeground(
+                    self._tone_color(tone)
+                )
+                self.activity_list.scrollToItem(self._verification_guidance_item)
+            if outcome == "verified":
+                self._verification_guidance_item = None
 
     def stop_task(self) -> None:
         """请求协作式停止；正在等待的网络请求或命令返回后才会生效。"""
@@ -540,6 +599,7 @@ class MainWindow(QMainWindow):
         if self._thread is not None:
             return
         self._conversation = Conversation(SYSTEM_PROMPT)
+        self._last_run_state = None
         self.conversation_view.clear()
         try:
             self._flush_session_saves()
@@ -549,6 +609,7 @@ class MainWindow(QMainWindow):
         self.activity_list.clear()
         self._trace_items.clear()
         self._trace_presentations.clear()
+        self._verification_guidance_item = None
         self._append_runtime("New conversation started.")
         self._reset_status_metrics()
 
@@ -651,6 +712,13 @@ class MainWindow(QMainWindow):
         )
 
     def _on_agent_completed(self, result: AgentResult) -> None:
+        self._last_run_state = {
+            "stop_reason": result.stop_reason,
+            "steps": result.steps,
+            "tool_calls": result.tool_calls,
+            "verification_status": result.verification_status,
+            "content": result.content,
+        }
         if result.stop_reason == "completed":
             self._append_message(
                 "AGENT FINAL RESPONSE",
@@ -662,6 +730,27 @@ class MainWindow(QMainWindow):
         elif result.stop_reason == "interrupted":
             self._append_runtime("Agent task interrupted by user.")
             state = "Ready"
+        elif result.stop_reason == "verification_required":
+            self._append_message(
+                "AGENT UNVERIFIED DRAFT",
+                result.content,
+                "#d29922",
+                markdown=True,
+            )
+            self._append_runtime(
+                "Agent execution ended, but the task is not complete: "
+                "the latest code still needs recognized verification.",
+                error=True,
+            )
+            state = "Needs Verification"
+            title, summary = STOP_REASON_TEXT[result.stop_reason]
+            self._add_activity(
+                result.stop_reason.upper(),
+                title,
+                summary,
+                result.content,
+                "warning",
+            )
         else:
             self._append_runtime(
                 f"Agent stopped: {result.stop_reason}\n{result.content}",
@@ -685,12 +774,20 @@ class MainWindow(QMainWindow):
             {
                 "Completed": "当前状态：任务完成",
                 "Ready": "当前状态：任务已停止",
+                "Needs Verification": "当前状态：执行已结束，但任务尚未完成验证",
                 "Failed": "当前状态：任务未完成，请查看最后一条说明",
             }.get(state, f"当前状态：{state}")
         )
         self._save_session()
 
     def _on_agent_failed(self, message: str) -> None:
+        self._last_run_state = {
+            "stop_reason": "worker_error",
+            "steps": 0,
+            "tool_calls": 0,
+            "verification_status": self._last_verification,
+            "content": message,
+        }
         self._append_runtime(f"Agent worker failed: {message}", error=True)
         self._add_activity(
             "WORKER ERROR",
@@ -753,13 +850,14 @@ class MainWindow(QMainWindow):
         summary: str,
         details: str,
         tone: str,
-    ) -> None:
+    ) -> QListWidgetItem:
         item = QListWidgetItem(f"{title}  [{label}]\n{summary}")
         item.setData(Qt.ItemDataRole.UserRole, details)
         item.setData(Qt.ItemDataRole.UserRole + 1, tone)
         item.setForeground(self._tone_color(tone))
         self.activity_list.addItem(item)
         self.activity_list.scrollToBottom()
+        return item
 
     def show_trace_details(self, item: QListWidgetItem) -> None:
         details = str(item.data(Qt.ItemDataRole.UserRole) or "No details available.")
@@ -798,8 +896,16 @@ class MainWindow(QMainWindow):
                 '<td width="18%"></td>'
                 f'<td class="userBubble"><div class="bubbleRole">{role_text}</div>{body}</td>'
             )
-        elif role == "AGENT FINAL RESPONSE":
-            role_text = "AGENT · 最终回答"
+        elif role in {
+            "AGENT FINAL RESPONSE",
+            "AGENT UNVERIFIED DRAFT",
+            "AGENT RESPONSE",
+        }:
+            role_text = {
+                "AGENT FINAL RESPONSE": "AGENT · 最终回答",
+                "AGENT UNVERIFIED DRAFT": "AGENT · 未验证草稿（不是完成结果）",
+                "AGENT RESPONSE": "AGENT · 历史回答（完成状态未知）",
+            }[role]
             row = (
                 f'<td class="agentBubble"><div class="bubbleRole">{role_text}</div>{body}</td>'
                 '<td width="18%"></td>'
@@ -887,6 +993,7 @@ class MainWindow(QMainWindow):
             messages,
             workspace,
             model,
+            self._last_run_state,
         )
         future.add_done_callback(self._session_save_completed)
 
@@ -913,20 +1020,38 @@ class MainWindow(QMainWindow):
             snapshot = self._session_store.load(self.workspace)
         except (OSError, ValueError) as error:
             self._conversation = Conversation(SYSTEM_PROMPT)
+            self._last_run_state = None
+            self._reset_status_metrics()
             self._append_runtime(f"Saved session could not be restored: {error}", error=True)
             return
         if snapshot is None:
             self._conversation = Conversation(SYSTEM_PROMPT)
+            self._last_run_state = None
+            self._reset_status_metrics()
             self.conversation_view.clear()
             self._append_runtime("Ready. Describe a coding task for this Workspace.")
             return
         self._conversation = snapshot.to_conversation()
+        self._last_run_state = snapshot.last_run
         self.conversation_view.clear()
         restored_message = "已恢复这个 Workspace 最近保存的会话。"
         if snapshot.compacted:
             restored_message += " 较早的工具结果已按存储上限安全压缩。"
         self._append_runtime(restored_message)
-        for message in snapshot.messages:
+        last_user_index = max(
+            (
+                index
+                for index, message in enumerate(snapshot.messages)
+                if message.get("role") == "user"
+            ),
+            default=-1,
+        )
+        last_stop_reason = (
+            str(snapshot.last_run.get("stop_reason"))
+            if snapshot.last_run is not None
+            else ""
+        )
+        for index, message in enumerate(snapshot.messages):
             role = message.get("role")
             content = message.get("content")
             if not isinstance(content, str) or not content:
@@ -934,9 +1059,56 @@ class MainWindow(QMainWindow):
             if role == "user":
                 self._append_message("USER TASK", content, "#1f6feb")
             elif role == "assistant" and not message.get("tool_calls"):
+                if (
+                    snapshot.last_run is not None
+                    and last_stop_reason != "completed"
+                    and index > last_user_index
+                ):
+                    continue
                 self._append_message(
-                    "AGENT FINAL RESPONSE", content, "#238636", markdown=True
+                    (
+                        "AGENT FINAL RESPONSE"
+                        if last_stop_reason == "completed"
+                        else "AGENT RESPONSE"
+                    ),
+                    content,
+                    "#238636",
+                    markdown=True,
                 )
+        if snapshot.last_run is not None and last_stop_reason != "completed":
+            draft = snapshot.last_run.get("content")
+            if isinstance(draft, str) and draft:
+                self._append_message(
+                    "AGENT UNVERIFIED DRAFT",
+                    draft,
+                    "#d29922",
+                    markdown=True,
+                )
+            self._append_runtime(
+                f"上次执行已结束，但任务没有完成：{last_stop_reason}。",
+                error=True,
+            )
+        if snapshot.last_run is not None:
+            steps = int(snapshot.last_run.get("steps", 0))
+            tool_calls = int(snapshot.last_run.get("tool_calls", 0))
+            verification = str(
+                snapshot.last_run.get(
+                    "verification_status", VERIFICATION_NOT_REQUIRED
+                )
+            )
+            restored_state = {
+                "completed": "Completed",
+                "interrupted": "Ready",
+                "verification_required": "Needs Verification",
+            }.get(last_stop_reason, "Failed")
+            self.steps_status.setText(
+                f"Steps: {steps} / {self.max_steps_spin.value()}"
+            )
+            self.tools_status.setText(f"Tool Calls: {tool_calls}")
+            self._set_verification(verification)
+            self._set_agent_state(restored_state)
+        else:
+            self._reset_status_metrics()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         if self._thread is not None and self._thread.isRunning():

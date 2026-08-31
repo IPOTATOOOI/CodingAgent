@@ -208,11 +208,44 @@ class VerificationTrackerTests(unittest.TestCase):
             ["cargo", "check"],
             ["mvn", "verify"],
             ["gradlew.bat", "test"],
+            ["node", "--check", "app.js"],
+            ["node", "-c", "app.js"],
+            ["node", "--test"],
+            ["node", "app.test.js"],
         ]
 
         for command in commands:
             with self.subTest(command=command):
                 self.assertTrue(is_verification_command(command))
+
+    def test_node_syntax_check_must_cover_pending_javascript(self) -> None:
+        tracker = VerificationTracker()
+        for index, path in enumerate(("app.js", "server.js"), 1):
+            tracker.record_tool_result(
+                _mutation_call(path, f"edit-{index}"),
+                _mutation_result(path),
+            )
+
+        tracker.record_tool_result(
+            _command_call(["node", "--check", "other.js"]),
+            _command_result(),
+        )
+        self.assertEqual(tracker.verification_status, "unverified")
+        self.assertEqual(tracker.last_attempt_outcome, "no_coverage")
+
+        tracker.record_tool_result(
+            _command_call(["node", "-c", "app.js"]),
+            _command_result(),
+        )
+        self.assertEqual(tracker.verification_status, "unverified")
+        self.assertEqual(tracker.pending_mutation_paths, {"server.js"})
+        self.assertEqual(tracker.last_attempt_outcome, "partial")
+
+        tracker.record_tool_result(
+            _command_call(["node", "--check", "server.js"], "run-3"),
+            _command_result(),
+        )
+        self.assertEqual(tracker.verification_status, "verified")
 
 
 class CompletionGateTests(unittest.TestCase):
@@ -270,7 +303,10 @@ class CompletionGateTests(unittest.TestCase):
 
         self.assertEqual(result.stop_reason, "max_steps")
         self.assertEqual(result.verification_status, "unverified")
-        self.assertEqual(conversation.messages[-1]["content"], VERIFICATION_REMINDER)
+        self.assertTrue(
+            conversation.messages[-1]["content"].startswith(VERIFICATION_REMINDER)
+        )
+        self.assertIn("- app.py", conversation.messages[-1]["content"])
 
     def test_edit_pass_then_final_answer_completes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -381,19 +417,31 @@ class CompletionGateTests(unittest.TestCase):
                 LLMResponse("Done once", []),
                 LLMResponse("Done twice", []),
                 LLMResponse("Done three times", []),
+                LLMResponse("Done four times", []),
+                LLMResponse("Done five times", []),
+                LLMResponse("Done six times", []),
             ]
-            agent, conversation = self._agent(client, workspace, max_steps=5)
+            agent, conversation = self._agent(client, workspace, max_steps=7)
 
             result = agent.run("Change app")
 
         reminders = [
             message
             for message in conversation.messages
-            if message["role"] == "system" and message["content"] == VERIFICATION_REMINDER
+            if message["role"] == "system"
+            and message["content"].startswith(VERIFICATION_REMINDER)
         ]
         self.assertEqual(result.stop_reason, "verification_required")
-        self.assertEqual(result.steps, 4)
-        self.assertEqual(len(reminders), 2)
+        self.assertEqual(result.steps, 7)
+        self.assertEqual(len(reminders), 5)
+        self.assertIn("- app.py", reminders[0]["content"])
+        self.assertFalse(
+            any(
+                message["role"] == "assistant"
+                and not message.get("tool_calls")
+                for message in conversation.messages
+            )
+        )
 
     def test_completion_gate_never_exceeds_max_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

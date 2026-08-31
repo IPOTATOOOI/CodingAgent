@@ -138,6 +138,11 @@ GUI 默认会在每次任务结束后把 Conversation 快照交给单线程后�
 `.mini-coding-agent/MiniCodingAgent/sessions`。文件名由平台规范化后的 Workspace 路径
 哈希生成。
 
+会话快照还保存最近一次运行的停止原因、步数、工具调用数和验证状态。重新打开 GUI 时，
+只有 `stop_reason=completed` 的回答会恢复为“最终回答”；`verification_required`、
+`max_steps`、`llm_error` 等结果会明确显示为未完成状态，避免把“执行线程已经结束”误解为
+“用户任务已经完成”。
+
 单个会话文件默认硬限制为 2 MiB。超过限制时，SessionStore 会按完整 Assistant Tool Call /
 Tool Result 协议组压缩较早结果并保留最近上下文；如果受保护的 System/User 消息本身仍然
 超限，则拒绝写入而不会产生半个文件。默认只保留最近 20 个、30 天内的会话。Unix 会话
@@ -259,7 +264,8 @@ test, build, or syntax-check command must finish without a timeout and with exit
 0 before the Runtime accepts a final answer as `completed`.
 
 Recognized commands include Python pytest, unittest, compileall and py_compile forms;
-direct `test_*.py` and `*_test.py` scripts; and common npm, yarn, pnpm, Go, Cargo,
+direct `test_*.py` and `*_test.py` scripts; Node `--check` / `-c` syntax checks,
+`--test`, and common JavaScript test filenames; and common npm, yarn, pnpm, Go, Cargo,
 Maven and Gradle test/build commands. A generic successful command such as
 `python script.py` or `python -c ...` is not automatically verification evidence.
 
@@ -269,12 +275,22 @@ cover all pending changes, while narrow syntax checks must target them. For exam
 `compileall src` check cannot verify an unrelated modified `config/settings.json`.
 
 If the model tries to finish while the latest generation is unverified or failed,
-the Runtime rejects that completion attempt and adds a short system reminder. At
-most two reminders are added. Continued unsupported completion attempts stop with
-`verification_required`, while `max_steps` remains the final step boundary. A new
+the Runtime rejects that completion attempt and adds a short system reminder. The
+reminder budget adapts to `max_steps`: at least five and at most eight reminders,
+so a large task is not cut off after only two premature completion attempts. Continued
+unsupported completion attempts stop with `verification_required`, while `max_steps`
+remains the final step boundary. Rejected drafts are not appended as ordinary Assistant
+answers. A new
 supported mutation after a successful check creates a new generation and requires
 new evidence. Documentation-only `.md`, `.txt`, and `.rst` changes do not require
 this code verification gate.
+
+窄范围检查可以累计证据。例如同时修改 `script.js` 和 `server.js` 后，连续执行
+`node --check script.js` 与 `node --check server.js` 即可覆盖两份文件，不要求用一条并不
+合法的 Node 命令同时检查多个入口。每次部分成功后，Runtime 会把“已覆盖文件”和“仍待
+验证文件”作为 System feedback 告诉模型；目标选错时也会明确指出 Node 不能用来检查
+HTML/CSS。GUI 将同一轮重复验证提醒合并到一个可更新的 Activity Item，成功后把该警告
+标记为已解决，避免右侧被内容相同的黄色条目淹没。
 
 This mechanism requires execution-based evidence for supported changes; it does not
 guarantee correctness. A syntax check is weaker than a behavioral test, and passing

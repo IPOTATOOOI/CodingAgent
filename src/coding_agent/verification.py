@@ -52,6 +52,8 @@ class VerificationTracker:
         self.verified_generation = 0
         self.verification_status = VERIFICATION_NOT_REQUIRED
         self.pending_mutation_paths: set[str] = set()
+        self.last_attempt_outcome: str | None = None
+        self.last_covered_paths: set[str] = set()
 
     @property
     def completion_blocked(self) -> bool:
@@ -64,6 +66,8 @@ class VerificationTracker:
         result: dict[str, Any],
     ) -> None:
         """根据真实工具结果更新 mutation generation 和验证状态。"""
+        self.last_attempt_outcome = None
+        self.last_covered_paths = set()
         if self._is_verifiable_mutation(tool_call, result):
             data = result["data"]
             self.mutation_generation += 1
@@ -84,21 +88,31 @@ class VerificationTracker:
         if not isinstance(data, dict):
             return
         cwd = data.get("cwd", ".")
-        if not isinstance(cwd, str) or not verification_command_covers_paths(
-            command,
-            cwd,
-            self.pending_mutation_paths,
-        ):
+        if not isinstance(cwd, str):
+            return
+        covered_paths = verification_command_covered_paths(
+            command, cwd, self.pending_mutation_paths
+        )
+        self.last_covered_paths = covered_paths
+        if not covered_paths:
+            self.last_attempt_outcome = "no_coverage"
             return
         if data.get("timed_out"):
             self.verification_status = VERIFICATION_FAILED
+            self.last_attempt_outcome = "failed"
             return
         if data.get("exit_code") == 0:
-            self.verified_generation = self.mutation_generation
-            self.verification_status = VERIFICATION_VERIFIED
-            self.pending_mutation_paths.clear()
+            self.pending_mutation_paths.difference_update(covered_paths)
+            if self.pending_mutation_paths:
+                self.verification_status = VERIFICATION_UNVERIFIED
+                self.last_attempt_outcome = "partial"
+            else:
+                self.verified_generation = self.mutation_generation
+                self.verification_status = VERIFICATION_VERIFIED
+                self.last_attempt_outcome = "verified"
         else:
             self.verification_status = VERIFICATION_FAILED
+            self.last_attempt_outcome = "failed"
 
     @staticmethod
     def _is_verifiable_mutation(
@@ -146,6 +160,8 @@ def is_verification_command(command: list[str]) -> bool:
         return True
     if _is_python_executable(executable):
         return _is_python_verification(arguments)
+    if executable == "node":
+        return _is_node_verification(arguments)
 
     if executable == "npm":
         return arguments[:1] == ["test"] or arguments[:2] in (
@@ -171,14 +187,33 @@ def verification_command_covers_paths(
     mutated_paths: set[str],
 ) -> bool:
     """判断窄范围语法检查是否覆盖全部待验证修改路径。"""
+    return (
+        verification_command_covered_paths(command, cwd, mutated_paths)
+        == mutated_paths
+    )
+
+
+def verification_command_covered_paths(
+    command: list[str],
+    cwd: str,
+    mutated_paths: set[str],
+) -> set[str]:
+    """返回一次验证命令实际覆盖的待验证路径，供多次窄检查累计证据。"""
     if not mutated_paths or not command:
-        return False
+        return set()
     executable = _normalized_executable(command[0])
     arguments = [argument.casefold() for argument in command[1:]]
+    if executable == "node" and arguments[:1] in (["--check"], ["-c"]):
+        targets = {
+            _command_target_path(cwd, argument)
+            for argument in command[2:]
+            if argument and not argument.startswith("-")
+        }
+        return mutated_paths.intersection(targets)
     if not _is_python_executable(executable):
-        return True
+        return set(mutated_paths)
     if len(arguments) < 2 or arguments[0] != "-m":
-        return True
+        return set(mutated_paths)
 
     module = arguments[1]
     targets = [
@@ -187,14 +222,15 @@ def verification_command_covers_paths(
         if argument and not argument.startswith("-")
     ]
     if module == "py_compile":
-        return bool(targets) and mutated_paths.issubset(set(targets))
+        return mutated_paths.intersection(targets)
     if module == "compileall":
         coverage_roots = targets or [_normalized_relative_path(cwd)]
-        return all(
-            any(_path_is_within(path, root) for root in coverage_roots)
+        return {
+            path
             for path in mutated_paths
-        )
-    return True
+            if any(_path_is_within(path, root) for root in coverage_roots)
+        }
+    return set(mutated_paths)
 
 
 def _is_python_verification(arguments: list[str]) -> bool:
@@ -207,6 +243,22 @@ def _is_python_verification(arguments: list[str]) -> bool:
     return bool(
         re.fullmatch(r"test_.+\.py", script_name)
         or re.fullmatch(r".+_test\.py", script_name)
+    )
+
+
+def _is_node_verification(arguments: list[str]) -> bool:
+    """识别 Node.js 语法检查、内置测试运行器和常见测试脚本。"""
+    if len(arguments) >= 2 and arguments[0] in {"--check", "-c"}:
+        return not arguments[1].startswith("-")
+    if arguments[:1] == ["--test"]:
+        return True
+    if not arguments:
+        return False
+    script_name = Path(arguments[0]).name
+    return bool(
+        re.fullmatch(r"test_.+\.(?:c|m)?js", script_name)
+        or re.fullmatch(r".+_test\.(?:c|m)?js", script_name)
+        or re.fullmatch(r".+\.test\.(?:c|m)?js", script_name)
     )
 
 

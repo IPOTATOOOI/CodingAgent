@@ -25,11 +25,17 @@ from coding_agent.verification import (
 DEFAULT_MAX_STEPS = 20
 MIN_MAX_STEPS = 1
 MAX_TOOL_CALLS_PER_STEP = 8
-MAX_VERIFICATION_REMINDERS = 2
+MIN_VERIFICATION_REMINDERS = 5
+MAX_VERIFICATION_REMINDERS = 8
 VERIFICATION_REMINDER = """Runtime verification requirement:
 
 The latest source-code changes have not been verified.
 Before completing the task, run an appropriate available test, build, or syntax-check command after the most recent modification.
+
+For a standalone JavaScript project, use one node --check <file> (or node -c <file>) command for each pending JavaScript file, or run a focused Node test that covers the project behavior. Do not use node --check for HTML or CSS. Pass run_command.command as a JSON array, not a string containing an array.
+
+A timed-out preview server is terminated by the Runtime. It is not browser verification, and you do not need to run kill or pkill afterward.
+Do not create placeholder test files that contain no executable assertions merely to satisfy verification.
 
 If verification fails, continue repairing the project."""
 INSPECTION_REMINDER = """Runtime progress advisory:
@@ -83,6 +89,10 @@ class Agent:
         self.conversation = conversation
         self.tool_registry = tool_registry
         self.max_steps = max_steps
+        self.verification_reminder_limit = min(
+            MAX_VERIFICATION_REMINDERS,
+            max(MIN_VERIFICATION_REMINDERS, max_steps // 10),
+        )
         self.context_manager = context_manager or ContextManager()
         self.reliability_tracker = reliability_tracker or ReliabilityTracker()
         self.retry_policy = retry_policy or LLMRetryPolicy()
@@ -215,6 +225,7 @@ class Agent:
                     )
                     self.reliability_tracker.start_step()
                     cancelled_during_tools = False
+                    verification_feedback: str | None = None
                     for tool_call in response.tool_calls:
                         handled_tool_calls += 1
                         if self.on_tool_call is not None:
@@ -281,6 +292,9 @@ class Agent:
                         previous_verification = (
                             self.verification_tracker.verification_status
                         )
+                        previous_pending_paths = set(
+                            self.verification_tracker.pending_mutation_paths
+                        )
                         self.verification_tracker.record_tool_result(
                             tool_call,
                             result,
@@ -288,6 +302,10 @@ class Agent:
                         if (
                             self.verification_tracker.verification_status
                             != previous_verification
+                            or self.verification_tracker.pending_mutation_paths
+                            != previous_pending_paths
+                            or self.verification_tracker.last_attempt_outcome
+                            == "no_coverage"
                         ):
                             self._emit(
                                 RuntimeEventKind.VERIFICATION_CHANGED,
@@ -295,9 +313,23 @@ class Agent:
                                 payload={
                                     "status": (
                                         self.verification_tracker.verification_status
-                                    )
+                                    ),
+                                    "outcome": (
+                                        self.verification_tracker.last_attempt_outcome
+                                    ),
+                                    "covered_paths": sorted(
+                                        self.verification_tracker.last_covered_paths
+                                    ),
+                                    "pending_paths": sorted(
+                                        self.verification_tracker.pending_mutation_paths
+                                    ),
                                 },
                             )
+                        feedback = self._verification_feedback_message()
+                        if self.verification_tracker.last_attempt_outcome == "verified":
+                            verification_feedback = None
+                        elif feedback is not None:
+                            verification_feedback = feedback
                         if self.on_tool_result is not None:
                             self.on_tool_result(step_number, tool_call, result)
                         self._emit(
@@ -313,6 +345,8 @@ class Agent:
                         )
                         if self._cancellation_requested():
                             cancelled_during_tools = True
+                    if verification_feedback is not None:
+                        self.conversation.add_system_message(verification_feedback)
                     if cancelled_during_tools:
                         return build_result("Agent task was interrupted.", "interrupted")
                     inspection_count = (
@@ -338,23 +372,33 @@ class Agent:
                     continue
 
                 if response.content:
-                    self.conversation.add_assistant_message(response.content)
                     # 模型生成最终文本期间若收到补充指令，先进入下一 Step 处理，
                     # 避免用户刚点击“追加”任务就已经结束而丢失消息。
                     if self.message_queue.pending_steering:
+                        self.conversation.add_assistant_message(response.content)
                         continue
                     if not self.verification_tracker.completion_blocked:
+                        self.conversation.add_assistant_message(response.content)
                         return build_result(response.content, "completed")
-                    if verification_reminders >= MAX_VERIFICATION_REMINDERS:
+                    if (
+                        verification_reminders
+                        >= self.verification_reminder_limit
+                    ):
                         return build_result(response.content, "verification_required")
                     verification_reminders += 1
-                    self.conversation.add_system_message(VERIFICATION_REMINDER)
+                    self.conversation.add_system_message(
+                        self._verification_reminder_message()
+                    )
                     self._emit(
                         RuntimeEventKind.VERIFICATION_CHANGED,
                         step=step_number,
                         payload={
                             "status": self.verification_tracker.verification_status,
                             "reminder": verification_reminders,
+                            "max_reminders": self.verification_reminder_limit,
+                            "pending_paths": sorted(
+                                self.verification_tracker.pending_mutation_paths
+                            ),
                         },
                     )
                     continue
@@ -371,6 +415,39 @@ class Agent:
             "Maximum agent steps reached before completion.",
             "max_steps",
         )
+
+    def _verification_reminder_message(self) -> str:
+        """生成包含尚未覆盖文件的可执行验证提示。"""
+        pending = sorted(self.verification_tracker.pending_mutation_paths)
+        path_lines = "\n".join(f"- {path}" for path in pending[:20])
+        if len(pending) > 20:
+            path_lines += f"\n- ... and {len(pending) - 20} more"
+        return f"{VERIFICATION_REMINDER}\n\nStill pending verification:\n{path_lines}"
+
+    def _verification_feedback_message(self) -> str | None:
+        """生成窄范围检查反馈；由调用方在完整 Tool Result 组之后写入。"""
+        outcome = self.verification_tracker.last_attempt_outcome
+        if outcome not in {"partial", "no_coverage"}:
+            return None
+        pending = sorted(self.verification_tracker.pending_mutation_paths)
+        pending_text = ", ".join(pending[:20])
+        if outcome == "partial":
+            covered_text = ", ".join(
+                sorted(self.verification_tracker.last_covered_paths)
+            )
+            message = (
+                "Runtime verification progress: the last command successfully "
+                f"checked {covered_text}. Still pending: {pending_text}. "
+                "Continue with checks for the remaining files or run one project-level test."
+            )
+        else:
+            message = (
+                "Runtime verification feedback: the last command did not cover any "
+                f"pending file. Still pending: {pending_text}. For JavaScript, use "
+                "node --check only with a pending .js/.mjs/.cjs file; it cannot validate "
+                "HTML or CSS."
+            )
+        return message
 
     def _cancellation_requested(self) -> bool:
         """在不影响 CLI 默认行为的前提下查询协作式取消状态。"""

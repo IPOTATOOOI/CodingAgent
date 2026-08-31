@@ -27,6 +27,8 @@ class AgentWorker(QObject):
     tool_finished = Signal(int, object, object, str)
     llm_retry = Signal(int, int)
     runtime_event = Signal(object)
+    result_ready = Signal(object)
+    # 兼容已有集成；新代码应使用语义更准确的 result_ready。
     completed = Signal(object)
     failed = Signal(str)
     finished = Signal()
@@ -87,6 +89,7 @@ class AgentWorker(QObject):
                 if follow_up is None:
                     break
                 result = agent.run(follow_up)
+            self.result_ready.emit(result)
             self.completed.emit(result)
         except Exception as error:  # Qt 线程边界必须把意外异常转换为 Signal。
             self.failed.emit(f"{type(error).__name__}: {error}")
