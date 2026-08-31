@@ -171,17 +171,21 @@ coding-agent --workspace . --save-session
 CLI 与 GUI 使用相同的 2 MiB 上限、协议安全压缩和默认保留策略。
 
 `--max-steps` limits the number of LLM responses in one user task. Its default is
-20 and its accepted range is 1 through 50. Reaching the limit stops immediately
-without making an additional LLM request.
+20 and it accepts any positive integer; the Agent Runtime has no artificial upper
+limit. Choose larger values carefully because they can increase API usage, runtime,
+and the number of local tool actions.
+Reaching the configured limit stops immediately without making an additional LLM
+request.
 
 The workspace defines the root directory that the file tools may inspect or modify.
 Canonical paths outside this root are rejected. This is basic workspace-boundary
 enforcement, not a complete security sandbox. Secret-bearing `.env` variants are
 excluded from file reading and text search; `.env.example` remains inspectable.
 
-`write_file` creates new files only and refuses to overwrite existing paths.
-`edit_file` changes an existing UTF-8 text file only when `old_text` occurs exactly
-once. Neither tool creates missing directories. Files larger than 1 MiB are rejected.
+`write_file` creates new files only, creates missing parent directories inside the
+Workspace, and refuses to overwrite existing paths. `edit_file` changes an existing
+UTF-8 text file only when `old_text` occurs exactly once. Files larger than 1 MiB are
+rejected.
 
 `run_command` accepts an executable and arguments as a string array, uses
 `shell=False`, disables interactive input, and restricts its working directory to the
@@ -207,18 +211,23 @@ The autonomous loop uses several deterministic Runtime safeguards:
 1. `max_steps` remains the final hard upper bound.
 2. The third consecutive identical Tool Action is not executed; the model receives
    a structured `RepeatedAction` result and can change strategy.
-3. Four consecutive Agent Steps without a new Observation or successful Workspace
+3. An identical successful read-only call is skipped while the Workspace remains
+   unchanged and returns `RepeatedObservation`. File changes and command execution
+   invalidate this observation memory.
+4. Every 12 different read-only calls without a file change or command emits a
+   progress reminder, asking the model to synthesize, act, verify, or finish.
+5. Four consecutive Agent Steps without a new Observation or successful Workspace
    mutation terminate the task with `no_progress`.
-4. Before every LLM request, `ContextManager` creates a bounded view of the complete
+6. Before every LLM request, `ContextManager` creates a bounded view of the complete
    Conversation. The default budgets are 60000 characters and an estimated 16000
    tokens; the recent-group target is 12. The dependency-free estimate treats CJK
    text more conservatively than a fixed characters-per-token ratio.
-5. Older large Tool Results are compacted deterministically. System instructions,
+7. Older large Tool Results are compacted deterministically. System instructions,
    the current User Task, and recent actions are prioritized.
-6. Rate limits, connection failures, timeouts, and server 5xx responses may be
+8. Rate limits, connection failures, timeouts, and server 5xx responses may be
    retried twice using 0.5- and 1-second delays. Authentication and model-not-found
    errors are not retried.
-7. Selected environment-mutating and directly destructive commands are rejected
+9. Selected environment-mutating and directly destructive commands are rejected
    before subprocess creation with `CommandBlocked`.
 
 The full Conversation remains available to the local Runtime and debugging code;
@@ -229,7 +238,7 @@ Tool Calling protocol relationships are not split.
 ## Runtime Event 与扩展接口
 
 `Agent` 通过可选的 `on_event(RuntimeEvent)` 发布统一事件，包括 task/step 生命周期、
-Context 构建、LLM 请求与文本增量、重试、Tool 开始/结束、steering、Verification 和最终
+Context 构建、LLM 请求与文本增量、重试、Tool 开始/结束、progress warning、steering、Verification 和最终
 停止原因。事件是普通 dataclass，不依赖 Qt；GUI Worker 只负责把它转成 Qt Signal。
 原来的 `on_tool_call`、`on_tool_result` 和 `on_llm_retry` 回调继续保留，因此 CLI 和已有
 集成不需要立即迁移。

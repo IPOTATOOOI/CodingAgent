@@ -9,7 +9,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from coding_agent.agent import Agent, DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
+from coding_agent.agent import Agent, DEFAULT_MAX_STEPS, MIN_MAX_STEPS
 from coding_agent.cli import SYSTEM_PROMPT
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         "--max-steps",
         type=int,
         default=DEFAULT_MAX_STEPS,
-        help=f"agent step limit ({MIN_MAX_STEPS}-{MAX_MAX_STEPS})",
+        help=f"agent step limit (minimum: {MIN_MAX_STEPS})",
     )
     parser.add_argument(
         "--case",
@@ -273,10 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--quiet-trace", action="store_true")
     arguments = parser.parse_args(argv)
-    if not MIN_MAX_STEPS <= arguments.max_steps <= MAX_MAX_STEPS:
-        parser.error(
-            f"max-steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}"
-        )
+    if arguments.max_steps < MIN_MAX_STEPS:
+        parser.error(f"max-steps must be at least {MIN_MAX_STEPS}")
     try:
         settings = Settings.from_env()
         client = LLMClient(settings)

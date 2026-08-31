@@ -18,6 +18,7 @@ class RuntimeEventKind(str, Enum):
     LLM_RETRY = "llm_retry"
     TOOL_STARTED = "tool_started"
     TOOL_FINISHED = "tool_finished"
+    PROGRESS_WARNING = "progress_warning"
     STEERING_RECEIVED = "steering_received"
     VERIFICATION_CHANGED = "verification_changed"
     TASK_FINISHED = "task_finished"

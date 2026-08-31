@@ -6,7 +6,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from coding_agent.agent import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
+from coding_agent.agent import DEFAULT_MAX_STEPS, MIN_MAX_STEPS
 from coding_agent.gui.main_window import MainWindow
 
 
@@ -19,10 +19,8 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path(arguments.workspace).resolve()
     if not workspace.is_dir():
         parser.error(f"workspace is not a directory: {workspace}")
-    if not MIN_MAX_STEPS <= arguments.max_steps <= MAX_MAX_STEPS:
-        parser.error(
-            f"max-steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}"
-        )
+    if arguments.max_steps < MIN_MAX_STEPS:
+        parser.error(f"max-steps must be at least {MIN_MAX_STEPS}")
 
     application = QApplication.instance() or QApplication(sys.argv[:1])
     application.setApplicationName("Mini Coding Agent")

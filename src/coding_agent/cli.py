@@ -10,7 +10,6 @@ from coding_agent.agent import (
     Agent,
     AgentResult,
     DEFAULT_MAX_STEPS,
-    MAX_MAX_STEPS,
     MIN_MAX_STEPS,
 )
 from coding_agent.config import ConfigurationError, Settings
@@ -24,12 +23,14 @@ from coding_agent.tools.registry import ToolRegistry, create_tool_registry
 SYSTEM_PROMPT = """You are Mini Coding Agent, an autonomous programming assistant operating under a bounded local runtime with access to the current workspace.
 Use the available tools to inspect the project, search text, create or edit UTF-8 files, and run non-interactive development commands.
 Work iteratively using actual tool observations, and avoid repeating an action when it has not produced new information.
+Plan the needed project structure before creating files. write_file creates missing parent directories inside the workspace.
 Choose actions dynamically from the current conversation instead of following a fixed read-edit-run workflow.
 Before modifying an existing file, inspect the relevant code first.
 Use edit_file for existing files and write_file only for new files.
 Do not use shell operators, start interactive programs, or start background processes.
 Package installation, environment mutation, and direct destructive commands are blocked by the local runtime; use the existing project environment.
 If a tool reports RepeatedAction, CommandBlocked, or another structured error, change strategy instead of retrying the same request.
+If a tool reports RepeatedObservation, use the earlier result instead of changing line ranges merely to read the same unchanged code again.
 Never claim that you inspected a local file unless you actually obtained its content through a tool.
 Never claim tests passed unless run_command actually produced evidence that they passed.
 A successful file edit does not imply that the code is correct.
@@ -37,6 +38,7 @@ After modifying source code or project configuration, verify the latest changes 
 Use an available test, build, or syntax-check command after the most recent modification.
 If verification fails, continue repairing the project.
 Do not install packages only for verification; use the existing environment.
+Do not probe several runtimes or package tools without a specific need; prefer evidence already available from the project and prior command results.
 If only a weaker verification such as syntax checking is available, state that limitation accurately.
 After a recognized verification command succeeds and the requested work is complete, return the final answer immediately without extra inspection or cleanup.
 If a tool fails or a command exits unsuccessfully, treat the result as an observation and decide whether another action can make progress.
@@ -141,7 +143,7 @@ def main(argv: list[str] | None = None) -> None:
         default=DEFAULT_MAX_STEPS,
         help=(
             "maximum LLM decision steps per task "
-            f"(default: {DEFAULT_MAX_STEPS}, range: {MIN_MAX_STEPS}-{MAX_MAX_STEPS})"
+            f"(default: {DEFAULT_MAX_STEPS}, minimum: {MIN_MAX_STEPS})"
         ),
     )
     arguments = parser.parse_args(argv)
@@ -150,10 +152,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(f"workspace does not exist: {workspace}")
     if not workspace.is_dir():
         parser.error(f"workspace is not a directory: {workspace}")
-    if not MIN_MAX_STEPS <= arguments.max_steps <= MAX_MAX_STEPS:
-        parser.error(
-            f"max-steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}"
-        )
+    if arguments.max_steps < MIN_MAX_STEPS:
+        parser.error(f"max-steps must be at least {MIN_MAX_STEPS}")
     run_cli(
         workspace_root=workspace,
         max_steps=arguments.max_steps,
@@ -191,6 +191,11 @@ def _print_runtime_event(event: RuntimeEvent) -> None:
         _print_llm_retry(
             int(payload.get("retry", 0)),
             int(payload.get("max_retries", 0)),
+        )
+    elif event.kind == RuntimeEventKind.PROGRESS_WARNING:
+        _safe_print(
+            "[progress] substantial inspection without a concrete action; "
+            "summarize existing observations, act, verify, or finish"
         )
 
 
@@ -268,6 +273,8 @@ def _format_tool_result_trace(
             return "[result] blocked by runtime policy"
         if result.get("error") == "RepeatedAction":
             return "[warning] repeated action detected"
+        if result.get("error") == "RepeatedObservation":
+            return "[warning] repeated observation skipped"
         return f"[result] error={result.get('error', 'ToolExecutionError')}"
 
     data = result.get("data", {})

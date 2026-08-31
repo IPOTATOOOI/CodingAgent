@@ -322,8 +322,8 @@ def create_tool_registry(
             name="write_file",
             description=(
                 "Create a new UTF-8 text file inside the current workspace. "
-                "This tool refuses to overwrite an existing file and does not "
-                "create missing parent directories."
+                "This tool refuses to overwrite an existing file and creates "
+                "missing parent directories within the workspace."
             ),
             parameters={
                 "type": "object",

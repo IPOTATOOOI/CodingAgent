@@ -114,6 +114,9 @@ def format_tool_result(
 
     arguments = _arguments(tool_call.arguments) or {}
     path = str(data.get("path") or arguments.get("path", "."))
+    # 只有写入类工具会生成修改预览；其他成功结果必须保持为空。
+    preview = ""
+    change_details = ""
     if tool_call.name == "run_command":
         return _format_command_result(label, arguments, data)
     if tool_call.name == "list_directory":
@@ -220,6 +223,11 @@ def _friendly_error(error: str) -> tuple[str, str, str]:
         "RepeatedAction": (
             "检测到重复操作",
             "相同操作连续出现且没有带来新信息，Runtime 要求 Agent 调整策略。",
+            "warning",
+        ),
+        "RepeatedObservation": (
+            "已有相同的查看结果",
+            "Workspace 尚未变化，Runtime 跳过了重复读取；Agent 应使用已有信息并采取下一步行动。",
             "warning",
         ),
         "Cancelled": (

@@ -417,9 +417,12 @@ class AgentTests(unittest.TestCase):
     def test_max_steps_constructor_validation(self) -> None:
         conversation = Conversation("System prompt")
         registry = Mock()
-        for invalid_value in (0, 51):
+        for invalid_value in (0, -1):
             with self.subTest(max_steps=invalid_value), self.assertRaises(ValueError):
                 Agent(Mock(), conversation, registry, max_steps=invalid_value)
+
+        agent = Agent(Mock(), conversation, registry, max_steps=120)
+        self.assertEqual(agent.max_steps, 120)
 
     def test_transient_llm_error_retries_without_adding_agent_step(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -498,6 +501,7 @@ class AgentTests(unittest.TestCase):
             for message in conversation.messages
             if message["role"] == "tool"
         ]
+        self.assertEqual(tool_results[1]["error"], "RepeatedObservation")
         self.assertEqual(tool_results[2]["error"], "RepeatedAction")
         self.assertTrue(tool_results[3]["success"])
         self.assertEqual(result.stop_reason, "completed")

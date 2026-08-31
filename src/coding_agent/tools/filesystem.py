@@ -185,25 +185,27 @@ class FilesystemTools:
         return {"query": query, "matches": matches, "truncated": False}
 
     def write_file(self, path: str, content: str) -> dict[str, Any]:
-        """在工作区中创建新的 UTF-8 文本文件，不覆盖已有路径。"""
+        """在工作区中创建新的 UTF-8 文本文件，并按需创建父目录。"""
         target = resolve_workspace_path(self.workspace_root, path)
         if target.exists():
             raise ToolError(
                 "FileAlreadyExists",
                 f"File '{path}' already exists. Use edit_file to modify existing files.",
             )
-        if not target.parent.exists() or not target.parent.is_dir():
-            raise ToolError(
-                "ParentDirectoryNotFound",
-                f"Parent directory for '{path}' does not exist.",
-            )
-
         encoded_content = content.encode("utf-8")
         if len(encoded_content) > MAX_FILE_BYTES:
             raise ToolError(
                 "FileTooLarge",
                 f"Content for '{path}' exceeds the {MAX_FILE_BYTES}-byte limit.",
             )
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except (FileExistsError, NotADirectoryError):
+            raise ToolError(
+                "ParentNotDirectory",
+                f"A parent component for '{path}' is not a directory.",
+            ) from None
 
         try:
             with target.open("x", encoding="utf-8", newline="") as file:

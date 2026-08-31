@@ -24,7 +24,6 @@ from coding_agent.verification import (
 
 DEFAULT_MAX_STEPS = 20
 MIN_MAX_STEPS = 1
-MAX_MAX_STEPS = 50
 MAX_TOOL_CALLS_PER_STEP = 8
 MAX_VERIFICATION_REMINDERS = 2
 VERIFICATION_REMINDER = """Runtime verification requirement:
@@ -33,6 +32,11 @@ The latest source-code changes have not been verified.
 Before completing the task, run an appropriate available test, build, or syntax-check command after the most recent modification.
 
 If verification fails, continue repairing the project."""
+INSPECTION_REMINDER = """Runtime progress advisory:
+
+You have made {count} different read-only inspection calls since the last file change or command execution.
+Synthesize the observations you already have and choose a concrete next action: edit the implementation, run an appropriate verification command, or finish if the task is complete.
+Do not re-read unchanged files. Inspect more only when a specific missing fact is required for the next action."""
 
 ToolCallCallback = Callable[[int, ToolCall], None]
 ToolResultCallback = Callable[[int, ToolCall, dict[str, Any]], None]
@@ -73,10 +77,8 @@ class Agent:
         on_event: RuntimeEventCallback | None = None,
         message_queue: AgentMessageQueue | None = None,
     ) -> None:
-        if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
-            raise ValueError(
-                f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}."
-            )
+        if max_steps < MIN_MAX_STEPS:
+            raise ValueError(f"max_steps must be at least {MIN_MAX_STEPS}.")
         self.llm_client = llm_client
         self.conversation = conversation
         self.tool_registry = tool_registry
@@ -222,6 +224,7 @@ class Agent:
                             step=step_number,
                             payload=self._tool_payload(tool_call),
                         )
+                        repeated_observation = False
                         if self._cancellation_requested():
                             repeated_action = False
                             cancelled_during_tools = True
@@ -234,6 +237,12 @@ class Agent:
                             repeated_action = (
                                 self.reliability_tracker.is_repeated_action(tool_call)
                             )
+                            repeated_observation = (
+                                not repeated_action
+                                and self.reliability_tracker.is_repeated_observation(
+                                    tool_call
+                                )
+                            )
                         if not cancelled_during_tools and repeated_action:
                             result = {
                                 "success": False,
@@ -241,6 +250,16 @@ class Agent:
                                 "message": (
                                     "The same tool call has been requested repeatedly "
                                     "without an intervening action. Reconsider the approach."
+                                ),
+                            }
+                        elif not cancelled_during_tools and repeated_observation:
+                            result = {
+                                "success": False,
+                                "error": "RepeatedObservation",
+                                "message": (
+                                    "This exact read-only tool call already succeeded "
+                                    "and the workspace has not changed since then. Use "
+                                    "the existing observation or take a concrete next action."
                                 ),
                             }
                         elif not cancelled_during_tools:
@@ -255,7 +274,9 @@ class Agent:
                         self.reliability_tracker.record_tool_result(
                             tool_call,
                             result,
-                            repeated_action=repeated_action,
+                            repeated_action=(
+                                repeated_action or repeated_observation
+                            ),
                         )
                         previous_verification = (
                             self.verification_tracker.verification_status
@@ -294,6 +315,18 @@ class Agent:
                             cancelled_during_tools = True
                     if cancelled_during_tools:
                         return build_result("Agent task was interrupted.", "interrupted")
+                    inspection_count = (
+                        self.reliability_tracker.take_inspection_reminder()
+                    )
+                    if inspection_count:
+                        self.conversation.add_system_message(
+                            INSPECTION_REMINDER.format(count=inspection_count)
+                        )
+                        self._emit(
+                            RuntimeEventKind.PROGRESS_WARNING,
+                            step=step_number,
+                            payload={"inspection_calls": inspection_count},
+                        )
                     if self.reliability_tracker.finish_step():
                         return build_result(
                             (

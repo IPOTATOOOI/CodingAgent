@@ -12,8 +12,12 @@ from coding_agent.llm import LLMError, ToolCall
 
 REPEATED_ACTION_LIMIT = 3
 NO_PROGRESS_LIMIT = 4
+INSPECTION_REMINDER_INTERVAL = 12
 MAX_LLM_RETRIES = 2
 DEFAULT_RETRY_DELAYS = (0.5, 1.0)
+READ_ONLY_OBSERVATION_TOOLS = frozenset(
+    {"list_directory", "read_file", "search_text"}
+)
 
 ResultType = TypeVar("ResultType")
 RetryCallback = Callable[[int, int], None]
@@ -63,13 +67,17 @@ class ReliabilityTracker:
         self,
         repeated_action_limit: int = REPEATED_ACTION_LIMIT,
         no_progress_limit: int = NO_PROGRESS_LIMIT,
+        inspection_reminder_interval: int = INSPECTION_REMINDER_INTERVAL,
     ) -> None:
         if repeated_action_limit < 2:
             raise ValueError("repeated_action_limit must be at least 2.")
         if no_progress_limit < 1:
             raise ValueError("no_progress_limit must be positive.")
+        if inspection_reminder_interval < 1:
+            raise ValueError("inspection_reminder_interval must be positive.")
         self.repeated_action_limit = repeated_action_limit
         self.no_progress_limit = no_progress_limit
+        self.inspection_reminder_interval = inspection_reminder_interval
         self.reset_task()
 
     def reset_task(self) -> None:
@@ -80,6 +88,7 @@ class ReliabilityTracker:
         self._step_has_progress = False
         self._step_has_result = False
         self.consecutive_no_progress_steps = 0
+        self._reset_observation_cycle()
 
     def start_step(self) -> None:
         """开始记录一个新的 Agent Step。"""
@@ -96,6 +105,22 @@ class ReliabilityTracker:
             self._consecutive_action_count = 1
         return self._consecutive_action_count >= self.repeated_action_limit
 
+    def is_repeated_observation(self, tool_call: ToolCall) -> bool:
+        """判断只读调用在 Workspace 未发生潜在变化时是否已经成功执行过。"""
+        return (
+            tool_call.name in READ_ONLY_OBSERVATION_TOOLS
+            and self.action_signature(tool_call) in self._observation_signatures
+        )
+
+    def take_inspection_reminder(self) -> int:
+        """到达下一档纯观察调用阈值时返回当前次数，并推进提醒档位。"""
+        if self._observation_calls < self._next_inspection_reminder:
+            return 0
+        count = self._observation_calls
+        while self._next_inspection_reminder <= count:
+            self._next_inspection_reminder += self.inspection_reminder_interval
+        return count
+
     def record_tool_result(
         self,
         tool_call: ToolCall,
@@ -107,12 +132,21 @@ class ReliabilityTracker:
         if self._is_successful_mutation(tool_call, result):
             self._step_has_progress = True
             self._last_observation_fingerprint = None
+            self._reset_observation_cycle()
             return
+        if tool_call.name == "run_command" and result.get("success"):
+            # 命令可能生成或修改文件，即使退出码非零，也应让旧读取记录失效。
+            self._reset_observation_cycle()
         if repeated_action or result.get("error") in {
             "RepeatedAction",
+            "RepeatedObservation",
             "CommandBlocked",
         }:
             return
+
+        if result.get("success") and tool_call.name in READ_ONLY_OBSERVATION_TOOLS:
+            self._observation_signatures.add(self.action_signature(tool_call))
+            self._observation_calls += 1
 
         fingerprint = self.result_fingerprint(tool_call, result)
         if fingerprint != self._last_observation_fingerprint:
@@ -126,6 +160,12 @@ class ReliabilityTracker:
         elif self._step_has_result:
             self.consecutive_no_progress_steps += 1
         return self.consecutive_no_progress_steps >= self.no_progress_limit
+
+    def _reset_observation_cycle(self) -> None:
+        """在任务开始或 Workspace 可能变化后重置只读观察记忆。"""
+        self._observation_signatures: set[str] = set()
+        self._observation_calls = 0
+        self._next_inspection_reminder = self.inspection_reminder_interval
 
     @staticmethod
     def action_signature(tool_call: ToolCall) -> str:

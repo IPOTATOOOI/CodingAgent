@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from coding_agent.agent import AgentResult, DEFAULT_MAX_STEPS, MAX_MAX_STEPS
+from coding_agent.agent import AgentResult, DEFAULT_MAX_STEPS, MIN_MAX_STEPS
 from coding_agent.cli import SYSTEM_PROMPT
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
@@ -58,6 +58,9 @@ from coding_agent.verification import (
 
 
 PREVIEW_MAX_BYTES = 512 * 1024
+# QSpinBox 内部使用 32 位有符号整数；这只是界面控件的技术边界，
+# Agent Runtime 本身不再设置人为的最大步数上限。
+QT_SPINBOX_MAXIMUM = 2_147_483_647
 PREVIEW_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html",
     ".ini", ".java", ".js", ".json", ".jsx", ".kt", ".md", ".php",
@@ -212,7 +215,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Max Steps"))
         self.max_steps_spin = QSpinBox()
         self.max_steps_spin.setObjectName("maxStepsSpin")
-        self.max_steps_spin.setRange(1, MAX_MAX_STEPS)
+        self.max_steps_spin.setRange(MIN_MAX_STEPS, QT_SPINBOX_MAXIMUM)
         self.max_steps_spin.setSingleStep(1)
         self.max_steps_spin.setButtonSymbols(
             QAbstractSpinBox.ButtonSymbols.UpDownArrows
@@ -511,6 +514,18 @@ class MainWindow(QMainWindow):
                     str(payload),
                     "info",
                 )
+        elif event.kind == RuntimeEventKind.PROGRESS_WARNING:
+            count = int(payload.get("inspection_calls", 0))
+            self._add_activity(
+                "PROGRESS",
+                "读取较多，但还没有采取下一步行动",
+                f"自上次修改或命令执行后已查看 {count} 次；Runtime 已提醒 Agent 汇总信息、修改、验证或完成任务。",
+                str(payload),
+                "warning",
+            )
+            self.current_action_label.setText(
+                "已提醒 Agent：停止重复查看并采取具体行动"
+            )
 
     def stop_task(self) -> None:
         """请求协作式停止；正在等待的网络请求或命令返回后才会生效。"""

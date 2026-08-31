@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from coding_agent import __version__
-from coding_agent.agent import Agent, DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
+from coding_agent.agent import Agent, DEFAULT_MAX_STEPS, MIN_MAX_STEPS
 from coding_agent.cli import SYSTEM_PROMPT
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
@@ -446,7 +446,7 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAX_STEPS,
         help=(
             "agent step limit "
-            f"({MIN_MAX_STEPS}-{MAX_MAX_STEPS})"
+            f"(minimum: {MIN_MAX_STEPS})"
         ),
     )
     parser.add_argument(
@@ -461,10 +461,8 @@ def main(argv: list[str] | None = None) -> int:
         help="hide per-step safe progress summaries",
     )
     arguments = parser.parse_args(argv)
-    if not MIN_MAX_STEPS <= arguments.max_steps <= MAX_MAX_STEPS:
-        parser.error(
-            f"max-steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}"
-        )
+    if arguments.max_steps < MIN_MAX_STEPS:
+        parser.error(f"max-steps must be at least {MIN_MAX_STEPS}")
     if not 1 <= arguments.runs <= MAX_EVAL_RUNS:
         parser.error(f"runs must be between 1 and {MAX_EVAL_RUNS}")
     try:
