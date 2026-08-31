@@ -194,16 +194,19 @@ class FilesystemToolsTests(unittest.TestCase):
         self.assertEqual(raised.exception.error, "FileAlreadyExists")
         self.assertEqual((self.workspace / "README.md").read_bytes(), original)
 
-    def test_write_file_rejects_traversal_and_missing_parent(self) -> None:
-        cases = [
-            ("../outside.py", "PathOutsideWorkspace"),
-            ("missing/child.py", "ParentDirectoryNotFound"),
-        ]
+    def test_write_file_creates_missing_parents_but_rejects_traversal(self) -> None:
+        result = self.tools.write_file("missing/nested/child.py", "content")
 
-        for path, expected_error in cases:
-            with self.subTest(path=path), self.assertRaises(ToolError) as raised:
-                self.tools.write_file(path, "content")
-            self.assertEqual(raised.exception.error, expected_error)
+        self.assertTrue(result["created"])
+        self.assertEqual(
+            (self.workspace / "missing" / "nested" / "child.py").read_text(
+                encoding="utf-8"
+            ),
+            "content",
+        )
+        with self.assertRaises(ToolError) as raised:
+            self.tools.write_file("../outside.py", "content")
+        self.assertEqual(raised.exception.error, "PathOutsideWorkspace")
 
     def test_edit_file_replaces_one_unique_utf8_block(self) -> None:
         target = self.workspace / "src" / "greeting.py"

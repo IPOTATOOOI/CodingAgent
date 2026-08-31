@@ -54,6 +54,39 @@ class ReliabilityTrackerTests(unittest.TestCase):
 
         self.assertEqual(blocked, [False, False, False, False])
 
+    def test_successful_read_is_remembered_until_workspace_may_change(self) -> None:
+        tracker = ReliabilityTracker()
+        first = ToolCall("read-1", "read_file", '{"path":"a.py"}')
+        same_read = ToolCall("read-2", "read_file", '{"path":"a.py"}')
+        read_result = {"success": True, "data": {"content": "value = 1"}}
+
+        self.assertFalse(tracker.is_repeated_observation(first))
+        tracker.record_tool_result(first, read_result)
+        self.assertTrue(tracker.is_repeated_observation(same_read))
+
+        edit = ToolCall("edit", "edit_file", '{"path":"a.py"}')
+        tracker.record_tool_result(
+            edit,
+            {"success": True, "data": {"modified": True}},
+        )
+        self.assertFalse(tracker.is_repeated_observation(same_read))
+
+    def test_inspection_reminder_repeats_at_configured_intervals(self) -> None:
+        tracker = ReliabilityTracker(inspection_reminder_interval=2)
+        result = {"success": True, "data": {"content": "text"}}
+
+        tracker.record_tool_result(
+            ToolCall("read-1", "read_file", '{"path":"a.py"}'),
+            result,
+        )
+        self.assertEqual(tracker.take_inspection_reminder(), 0)
+        tracker.record_tool_result(
+            ToolCall("read-2", "read_file", '{"path":"b.py"}'),
+            result,
+        )
+        self.assertEqual(tracker.take_inspection_reminder(), 2)
+        self.assertEqual(tracker.take_inspection_reminder(), 0)
+
     def test_identical_observations_accumulate_no_progress(self) -> None:
         tracker = ReliabilityTracker(no_progress_limit=2)
         call = ToolCall("call", "run_command", '{"command":["pytest"]}')

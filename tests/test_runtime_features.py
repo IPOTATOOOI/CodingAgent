@@ -13,6 +13,7 @@ from coding_agent.conversation import Conversation
 from coding_agent.events import RuntimeEventKind
 from coding_agent.llm import LLMResponse, ToolCall
 from coding_agent.message_queue import AgentMessageQueue
+from coding_agent.reliability import ReliabilityTracker
 from coding_agent.session import SessionStore, SessionTooLargeError
 from coding_agent.tools.registry import create_tool_registry
 
@@ -45,6 +46,53 @@ class RuntimeFeatureTests(unittest.TestCase):
         self.assertIn(RuntimeEventKind.TOOL_FINISHED, kinds)
         self.assertEqual(kinds[-1], RuntimeEventKind.TASK_FINISHED)
         self.assertEqual(events[-1].payload["stop_reason"], "completed")
+        self.assertEqual(result.stop_reason, "completed")
+
+    def test_many_inspections_emit_a_progress_warning_for_the_next_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "a.py").write_text("a = 1\n", encoding="utf-8")
+            (workspace / "b.py").write_text("b = 2\n", encoding="utf-8")
+            client = Mock()
+            client.complete.side_effect = [
+                LLMResponse(
+                    None,
+                    [ToolCall("read-1", "read_file", '{"path":"a.py"}')],
+                ),
+                LLMResponse(
+                    None,
+                    [ToolCall("read-2", "read_file", '{"path":"b.py"}')],
+                ),
+                LLMResponse("Done", []),
+            ]
+            events = []
+            conversation = Conversation("System")
+            agent = Agent(
+                client,
+                conversation,
+                create_tool_registry(workspace),
+                reliability_tracker=ReliabilityTracker(
+                    inspection_reminder_interval=2
+                ),
+                on_event=events.append,
+            )
+
+            result = agent.run("Inspect")
+
+        warnings = [
+            event
+            for event in events
+            if event.kind == RuntimeEventKind.PROGRESS_WARNING
+        ]
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].payload["inspection_calls"], 2)
+        self.assertTrue(
+            any(
+                message["role"] == "system"
+                and "concrete next action" in message["content"]
+                for message in conversation.messages
+            )
+        )
         self.assertEqual(result.stop_reason, "completed")
 
     def test_steering_added_during_request_is_applied_before_completion(self) -> None:

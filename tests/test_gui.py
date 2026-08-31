@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QStyleOptionSpi
 
 from coding_agent.config import Settings
 from coding_agent.agent import DEFAULT_MAX_STEPS
+from coding_agent.events import RuntimeEvent, RuntimeEventKind
+from coding_agent.gui.app import main as gui_main
 from coding_agent.gui.main_window import (
     MainWindow,
     markdown_to_html_fragment,
@@ -65,9 +67,11 @@ class GuiTests(unittest.TestCase):
         self,
         client_factory=lambda settings: _SlowSuccessClient(),
         session_store=None,
+        max_steps=DEFAULT_MAX_STEPS,
     ):
         window = MainWindow(
             self.workspace,
+            max_steps=max_steps,
             settings=self.settings,
             client_factory=client_factory,
             session_store=session_store or self.session_store,
@@ -113,6 +117,25 @@ class GuiTests(unittest.TestCase):
         window.max_steps_spin.stepDown()
         self.assertEqual(window.max_steps_spin.value(), 20)
         self.assertGreaterEqual(window.max_steps_spin.minimumWidth(), 82)
+
+    def test_gui_accepts_max_steps_above_previous_limit(self) -> None:
+        window = self._window(max_steps=120)
+
+        self.assertEqual(window.max_steps_spin.value(), 120)
+
+    def test_gui_entrypoint_forwards_large_max_steps(self) -> None:
+        with patch("coding_agent.gui.app.MainWindow") as window_class, patch(
+            "coding_agent.gui.app.QApplication"
+        ) as application_class:
+            application = application_class.instance.return_value
+            application.exec.return_value = 0
+
+            exit_code = gui_main(
+                ["--workspace", str(self.workspace), "--max-steps", "120"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(window_class.call_args.kwargs["max_steps"], 120)
 
     def test_theme_icon_switches_between_dark_and_light_modes(self) -> None:
         window = self._window()
@@ -283,6 +306,21 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.verification_status.text(), "Verification: 验证通过")
         self.assertIn("项目测试通过", window.current_action_label.text())
 
+    def test_progress_warning_event_is_explained_in_activity_panel(self) -> None:
+        window = self._window()
+
+        window._on_runtime_event(
+            RuntimeEvent(
+                RuntimeEventKind.PROGRESS_WARNING,
+                step=12,
+                payload={"inspection_calls": 12},
+            )
+        )
+
+        self.assertIn("读取较多", window.activity_list.item(0).text())
+        self.assertIn("12 次", window.activity_list.item(0).text())
+        self.assertIn("采取具体行动", window.current_action_label.text())
+
     def test_worker_failure_restores_controls(self) -> None:
         window = self._window(lambda settings: _FailingClient())
         window.task_input.setPlainText("trigger failure")
@@ -346,6 +384,27 @@ class GuiTests(unittest.TestCase):
         self.assertNotIn("secret new", call_view.details)
         self.assertLess(len(result_view.details), 3000)
         self.assertEqual(result_view.tone, "error")
+
+    def test_successful_read_trace_has_an_empty_change_preview(self) -> None:
+        call = ToolCall("read-1", "read_file", '{"path":"app.py"}')
+
+        presentation = format_tool_result(
+            call,
+            {
+                "success": True,
+                "data": {
+                    "path": "app.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "content": "1 | value = 1",
+                    "truncated": False,
+                },
+            },
+        )
+
+        self.assertEqual(presentation.preview, "")
+        self.assertEqual(presentation.tone, "success")
 
     def test_trace_explains_actions_and_failures_in_user_language(self) -> None:
         test_call = ToolCall(

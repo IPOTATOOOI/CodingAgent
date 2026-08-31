@@ -182,6 +182,13 @@ class CliTests(unittest.TestCase):
             ),
             "[warning] repeated action detected",
         )
+        self.assertEqual(
+            _format_tool_result_trace(
+                call,
+                {"success": False, "error": "RepeatedObservation"},
+            ),
+            "[warning] repeated observation skipped",
+        )
 
     def test_llm_retry_trace_does_not_include_error_details(self) -> None:
         output = io.StringIO()
@@ -202,7 +209,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("do not install packages only for verification", lowered)
         self.assertIn("tool fails", lowered)
         self.assertIn("repeatedaction", lowered)
+        self.assertIn("repeatedobservation", lowered)
         self.assertIn("commandblocked", lowered)
+        self.assertIn("creates missing parent directories", lowered)
+        self.assertIn("do not probe several runtimes", lowered)
         self.assertIn("unrelated cleanup", lowered)
 
     def test_empty_input_does_not_call_llm(self) -> None:
@@ -250,9 +260,9 @@ class CliTests(unittest.TestCase):
 
     def test_main_forwards_valid_max_steps(self) -> None:
         with patch("coding_agent.cli.run_cli") as mocked_run_cli:
-            main(["--workspace", ".", "--max-steps", "7"])
+            main(["--workspace", ".", "--max-steps", "120"])
 
-        self.assertEqual(mocked_run_cli.call_args.kwargs["max_steps"], 7)
+        self.assertEqual(mocked_run_cli.call_args.kwargs["max_steps"], 120)
 
     def test_main_forwards_explicit_session_options(self) -> None:
         with patch("coding_agent.cli.run_cli") as mocked_run_cli:
@@ -293,8 +303,8 @@ class CliTests(unittest.TestCase):
         roles = [message["role"] for message in second_client.complete.call_args.args[0]]
         self.assertEqual(roles, ["system", "user", "assistant", "user"])
 
-    def test_main_rejects_max_steps_outside_allowed_range(self) -> None:
-        for value in ("0", "51"):
+    def test_main_rejects_non_positive_max_steps(self) -> None:
+        for value in ("0", "-1"):
             with self.subTest(max_steps=value), patch(
                 "sys.stderr", io.StringIO()
             ), self.assertRaises(SystemExit):
