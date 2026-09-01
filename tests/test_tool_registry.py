@@ -19,19 +19,20 @@ class ToolRegistryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def test_six_tools_are_registered_with_schemas(self) -> None:
+    def test_seven_tools_are_registered_with_schemas(self) -> None:
         self.assertEqual(
             self.registry.names,
             (
                 "list_directory",
                 "read_file",
                 "search_text",
+                "create_directory",
                 "write_file",
                 "edit_file",
                 "run_command",
             ),
         )
-        self.assertEqual(len(self.registry.schemas), 6)
+        self.assertEqual(len(self.registry.schemas), 7)
         self.assertEqual(
             [schema["function"]["name"] for schema in self.registry.schemas],
             list(self.registry.names),

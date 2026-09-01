@@ -37,6 +37,9 @@ The project currently supports:
 - A six-task evaluation runner with Agent-invisible independent verifiers
 - A PySide6 desktop GUI that reuses the existing Agent Runtime
 - A typed Runtime Event stream shared by the Agent Worker and GUI
+- Structured per-task Evidence Trails with JSON export and read-only replay
+- Runtime-level Ask / Auto Edit / Auto / Read Only approval modes
+- Diff-first file editing trace and an explicit directory-creation tool
 - Streaming model text with cooperative cancellation
 - Running-task steering and queued follow-up messages
 - Atomic, workspace-scoped conversation persistence and recovery
@@ -115,8 +118,18 @@ GUI 采用适合演示 Autonomous Loop 的三栏结构：
   继续定位和修复”。Read、Search、List、Create、Edit、Run 等底层工具标签仍会保留；
   真实命令、参数、退出码和有界 stdout/stderr 放在点击详情中，不会把完整文件内容或
   无限输出直接塞进主时间线。
-- 成功的 `edit_file` 步骤会显示文件路径、准确修改行号以及有界的 `- 修改前 / + 修改后`
-  Diff；点击步骤可以查看更完整的 Unified Diff。失败的编辑不会展示为已发生的修改。
+- 成功的 `edit_file` 步骤采用 Diff-first 展示：文件路径和 `@@ 行号 @@` 位于步骤顶部，
+  紧接着显示有界的 `- 修改前 / + 修改后` 与 `✓ Applied`；点击步骤可以查看更完整的
+  Unified Diff。失败的编辑不会展示为已发生的修改。
+- 右侧 `TASK EVIDENCE` 卡片汇总文件/目录变更数量、Verification、Stop Reason、Steps、
+  Tool Calls 和 Duration。每个 GUI 任务会自动保存一份有界 JSON Trace；`Export Trace`
+  可复制到指定位置，`Replay Trace` 只读重建工具时间线，不调用 LLM、不运行工具，也不
+  修改 Workspace。Windows 默认 Trace 目录为 `%LOCALAPPDATA%/MiniCodingAgent/traces`，
+  自动 Trace 默认保留最近 100 份、30 天；用户导出的副本不参与自动清理。
+- 顶部 `Safety Mode` 在 Tool handler 或 subprocess 启动前生效：`Ask` 对修改和命令弹出
+  非阻塞授权卡片；`Auto Edit` 自动允许文件/目录修改但询问命令；`Auto` 继续服从现有
+  Runtime Command Policy 自动执行；`Read Only` 只允许 List/Read/Search。演示时可选择
+  Auto，讲解安全边界时可切换 Ask 或 Read Only。
 - 底部状态栏显示 Agent 状态、步数、Verification、工具调用数量和耗时。
 - 顶部太阳/月亮图标可以即时切换亮色和暗色主题，不会清空当前会话。
 
@@ -152,6 +165,13 @@ Tool Result 协议组压缩较早结果并保留最近上下文；如果受保�
 
 选择 Workspace 只会刷新文件树并为下一次任务创建相应的 Tool Registry；文件读写和
 命令执行仍通过现有 Runtime 的规范路径检查，GUI 不会绕过 Workspace Boundary。
+Approval Mode 是 Workspace Boundary 与 Command Policy 之外的附加授权层，不替代它们；
+即使选择 Auto，`pip install` 等现有禁用命令仍会在 subprocess 启动前被阻止。
+
+Evidence JSON 保存任务文字、模型名、结构化工具摘要、有界 stdout/stderr 预览和有界代码
+Diff，但不会保存 API Key，也不会复制完整 read_file 内容或完整 write/edit 参数。Trace
+仍可能包含敏感代码片段，导出或分享前应先检查内容。GUI 自动保存 Evidence；CLI 为保持
+原有无隐式持久化行为，不会自动创建 Trace。
 
 ### Command-line interface
 
@@ -187,7 +207,9 @@ Canonical paths outside this root are rejected. This is basic workspace-boundary
 enforcement, not a complete security sandbox. Secret-bearing `.env` variants are
 excluded from file reading and text search; `.env.example` remains inspectable.
 
-`write_file` creates new files only, creates missing parent directories inside the
+`create_directory` explicitly creates a directory and safely fills missing parents,
+which also supports empty project directories and produces a clear Create Dir trace.
+`write_file` creates new files only, still creates missing parent directories inside the
 Workspace, and refuses to overwrite existing paths. `edit_file` changes an existing
 UTF-8 text file only when `old_text` occurs exactly once. Files larger than 1 MiB are
 rejected.
@@ -249,7 +271,7 @@ Context 构建、LLM 请求与文本增量、重试、Tool 开始/结束、progr
 集成不需要立即迁移。
 
 新增工具可以使用 `ToolDefinition.from_callable(...)` 从类型注解生成基础 JSON Schema，
-再通过 `parameter_overrides` 明确补充 minimum、maximum 等安全约束。现有六个核心工具仍
+再通过 `parameter_overrides` 明确补充 minimum、maximum 等安全约束。现有七个核心工具仍
 保留人工审查过的 schema，避免自动推断意外放宽 Runtime 边界。
 
 These are basic local Runtime safeguards, not a complete security sandbox. Child

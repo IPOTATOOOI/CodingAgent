@@ -209,6 +209,7 @@ class ReliabilityTracker:
     ) -> bool:
         """识别真正改变 Workspace 的成功文件操作。"""
         if not result.get("success") or tool_call.name not in {
+            "create_directory",
             "write_file",
             "edit_file",
         }:

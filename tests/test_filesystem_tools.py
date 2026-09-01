@@ -185,6 +185,25 @@ class FilesystemToolsTests(unittest.TestCase):
             "print('你好')\n",
         )
 
+    def test_create_directory_reports_each_created_level(self) -> None:
+        result = self.tools.create_directory("web/src/js")
+
+        self.assertTrue((self.workspace / "web" / "src" / "js").is_dir())
+        self.assertEqual(result["path"], "web/src/js")
+        self.assertEqual(
+            result["created_directories"],
+            ["web", "web/src", "web/src/js"],
+        )
+
+    def test_create_directory_rejects_existing_and_outside_paths(self) -> None:
+        with self.assertRaises(ToolError) as existing:
+            self.tools.create_directory("src")
+        self.assertEqual(existing.exception.error, "DirectoryAlreadyExists")
+
+        with self.assertRaises(ToolError) as outside:
+            self.tools.create_directory("../outside/new")
+        self.assertEqual(outside.exception.error, "PathOutsideWorkspace")
+
     def test_write_file_refuses_existing_file_without_changing_it(self) -> None:
         original = (self.workspace / "README.md").read_bytes()
 

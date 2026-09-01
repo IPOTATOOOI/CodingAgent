@@ -12,11 +12,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QStyle, QStyleOptionSpinBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMessageBox,
+    QStyle,
+    QStyleOptionSpinBox,
+)
 
 from coding_agent.config import Settings
 from coding_agent.agent import AgentResult, DEFAULT_MAX_STEPS
 from coding_agent.events import RuntimeEvent, RuntimeEventKind
+from coding_agent.evidence import EvidenceStore
 from coding_agent.gui.app import main as gui_main
 from coding_agent.gui.main_window import (
     MainWindow,
@@ -41,6 +48,27 @@ class _FailingClient:
         raise RuntimeError("worker boom")
 
 
+class _ApprovalClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages, tools=None):
+        del messages, tools
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                None,
+                [
+                    ToolCall(
+                        "write-approved",
+                        "write_file",
+                        '{"path":"approved.txt","content":"created"}',
+                    )
+                ],
+            )
+        return LLMResponse("Created after approval.", [])
+
+
 class GuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -55,6 +83,7 @@ class GuiTests(unittest.TestCase):
             file.write("value = 1\n")
         self.settings = Settings(api_key="test-key", model="test-model")
         self.session_store = SessionStore(self.workspace / ".test-sessions")
+        self.evidence_store = EvidenceStore(self.workspace / ".test-traces")
         self.windows: list[MainWindow] = []
 
     def tearDown(self) -> None:
@@ -75,6 +104,7 @@ class GuiTests(unittest.TestCase):
             settings=self.settings,
             client_factory=client_factory,
             session_store=session_store or self.session_store,
+            evidence_store=self.evidence_store,
         )
         self.windows.append(window)
         return window
@@ -94,6 +124,8 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.model_label.text(), "test-model")
         self.assertEqual(DEFAULT_MAX_STEPS, 20)
         self.assertEqual(window.max_steps_spin.value(), 20)
+        self.assertEqual(window.safety_mode_combo.currentText(), "Ask")
+        self.assertTrue(window.replay_trace_button.isEnabled())
 
     def test_max_steps_can_be_increased_and_decreased(self) -> None:
         window = self._window()
@@ -325,6 +357,107 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(window.run_button.isEnabled())
         self.assertEqual(window.agent_status.text(), "Agent: Completed")
         self.assertIn("Task completed from worker.", window.conversation_view.toPlainText())
+        self.assertTrue(window.export_trace_button.isEnabled())
+        self.assertIn("Stop Reason: completed", window.evidence_summary.text())
+        self.assertEqual(len(list(self.evidence_store.root.glob("*.json"))), 1)
+
+    def test_ask_mode_waits_before_write_and_accepts_approval(self) -> None:
+        client = _ApprovalClient()
+        window = self._window(lambda settings: client)
+        window.show()
+        self.application.processEvents()
+        window.task_input.setPlainText("create a file")
+
+        window.run_task()
+        deadline = time.monotonic() + 3
+        while not window.approval_frame.isVisible() and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.01)
+
+        self.assertTrue(window.approval_frame.isVisible())
+        self.assertFalse((self.workspace / "approved.txt").exists())
+        self.assertIn("Requested change", window.approval_label.text())
+        self.assertIn("+created", window.approval_label.text())
+        window.approve_button.click()
+        self._wait_for_worker(window)
+
+        self.assertEqual(
+            (self.workspace / "approved.txt").read_text(encoding="utf-8"),
+            "created",
+        )
+        self.assertIn("已批准工具执行", window.activity_list.item(1).text())
+        self.assertEqual(window._evidence_snapshot["approvals"][0]["approved"], True)
+
+    def test_read_only_mode_blocks_write_without_showing_approval(self) -> None:
+        window = self._window(lambda settings: _ApprovalClient())
+        window.safety_mode_combo.setCurrentIndex(3)
+        window.task_input.setPlainText("try to create a file")
+
+        window.run_task()
+        self._wait_for_worker(window)
+
+        self.assertFalse((self.workspace / "approved.txt").exists())
+        self.assertTrue(window.approval_frame.isHidden())
+        combined = "\n".join(
+            window.activity_list.item(index).text()
+            for index in range(window.activity_list.count())
+        )
+        self.assertIn("只读模式", combined)
+        self.assertEqual(
+            window._evidence_snapshot["tools"][0]["error"], "ReadOnlyMode"
+        )
+
+    def test_export_and_replay_trace_are_read_only(self) -> None:
+        window = self._window()
+        snapshot = {
+            "version": 1,
+            "trace_id": "replay-1",
+            "task": "Repair calculator",
+            "model": "test-model",
+            "steps": 2,
+            "tool_calls": 1,
+            "files_created": 0,
+            "files_modified": 1,
+            "directories_created": 0,
+            "verification": "verified",
+            "stop_reason": "completed",
+            "duration": 1.25,
+            "tools": [
+                {
+                    "id": "edit-1",
+                    "step": 1,
+                    "tool": "edit_file",
+                    "success": True,
+                    "error": None,
+                    "diff": "-value = 1\n+value = 2",
+                }
+            ],
+        }
+        source = self.evidence_store.save(snapshot)
+        export_path = self.workspace / "exported-trace.json"
+        original = (self.workspace / "app.py").read_text(encoding="utf-8")
+        window._evidence_snapshot = snapshot
+
+        with patch.object(
+            QFileDialog,
+            "getSaveFileName",
+            return_value=(str(export_path), "JSON files (*.json)"),
+        ):
+            window.export_trace()
+        with patch.object(
+            QFileDialog,
+            "getOpenFileName",
+            return_value=(str(source), "JSON files (*.json)"),
+        ):
+            window.replay_trace()
+
+        self.assertTrue(export_path.exists())
+        self.assertIn("REPLAY", window.activity_list.item(0).text())
+        self.assertIn("-value = 1", window.activity_list.item(0).text())
+        self.assertIn("不会执行任何工具", window.current_action_label.text())
+        self.assertEqual(
+            (self.workspace / "app.py").read_text(encoding="utf-8"), original
+        )
 
     def test_trace_event_updates_item_and_verification_status(self) -> None:
         window = self._window()
@@ -579,7 +712,8 @@ class GuiTests(unittest.TestCase):
         self.assertIn("第 8 行 → 第 8 行", presentation.summary)
         self.assertIn("-return a - b", presentation.preview)
         self.assertIn("+return a + b", presentation.preview)
-        self.assertIn("修改预览", item_text)
+        self.assertIn("@@ 第 8 行 → 第 8 行 @@", item_text)
+        self.assertIn("✓ Applied", item_text)
         self.assertIn("-return a - b", item_text)
         self.assertIn("+return a + b", item_text)
         self.assertIn("修改内容", presentation.details)

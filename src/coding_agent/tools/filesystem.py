@@ -184,6 +184,39 @@ class FilesystemTools:
 
         return {"query": query, "matches": matches, "truncated": False}
 
+    def create_directory(self, path: str) -> dict[str, Any]:
+        """在工作区内创建目录，并返回本次实际补齐的目录层级。"""
+        target = resolve_workspace_path(self.workspace_root, path)
+        if target.exists():
+            error = "DirectoryAlreadyExists" if target.is_dir() else "PathAlreadyExists"
+            raise ToolError(error, f"Path '{path}' already exists.")
+
+        missing: list[Path] = []
+        current = target
+        while current != self.workspace_root and not current.exists():
+            missing.append(current)
+            current = current.parent
+        if current.exists() and not current.is_dir():
+            raise ToolError(
+                "ParentNotDirectory",
+                f"A parent component for '{path}' is not a directory.",
+            )
+        try:
+            target.mkdir(parents=True, exist_ok=False)
+        except (FileExistsError, NotADirectoryError):
+            raise ToolError(
+                "ParentNotDirectory",
+                f"A parent component for '{path}' is not a directory.",
+            ) from None
+        created_directories = [
+            self._relative_path(item) for item in reversed(missing)
+        ]
+        return {
+            "path": self._relative_path(target),
+            "created": True,
+            "created_directories": created_directories,
+        }
+
     def write_file(self, path: str, content: str) -> dict[str, Any]:
         """在工作区中创建新的 UTF-8 文本文件，并按需创建父目录。"""
         target = resolve_workspace_path(self.workspace_root, path)

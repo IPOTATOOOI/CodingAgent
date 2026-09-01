@@ -2,6 +2,7 @@
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from html import escape
+import json
 from pathlib import Path
 import time
 from typing import Any
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFileSystemModel,
@@ -37,10 +39,12 @@ from PySide6.QtWidgets import (
 )
 
 from coding_agent.agent import AgentResult, DEFAULT_MAX_STEPS, MIN_MAX_STEPS
+from coding_agent.approval import SafetyMode
 from coding_agent.cli import SYSTEM_PROMPT
 from coding_agent.config import ConfigurationError, Settings
 from coding_agent.conversation import Conversation
 from coding_agent.events import RuntimeEvent, RuntimeEventKind
+from coding_agent.evidence import EvidenceStore, EvidenceTrailBuilder
 from coding_agent.gui.trace import (
     TracePresentation,
     format_tool_call,
@@ -125,6 +129,7 @@ class MainWindow(QMainWindow):
         settings: Settings | None = None,
         client_factory: ClientFactory = LLMClient,
         session_store: SessionStore | None = None,
+        evidence_store: EvidenceStore | None = None,
     ) -> None:
         super().__init__()
         self.workspace = (workspace or Path.cwd()).resolve()
@@ -133,6 +138,7 @@ class MainWindow(QMainWindow):
         self._settings = settings
         self._client_factory = client_factory
         self._session_store = session_store or SessionStore()
+        self._evidence_store = evidence_store or EvidenceStore()
         self._session_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="session-save",
@@ -147,6 +153,11 @@ class MainWindow(QMainWindow):
         self._verification_guidance_item: QListWidgetItem | None = None
         self._last_verification = VERIFICATION_NOT_REQUIRED
         self._last_run_state: dict[str, object] | None = None
+        self._evidence_builder: EvidenceTrailBuilder | None = None
+        self._evidence_snapshot: dict[str, Any] | None = None
+        self._evidence_path: Path | None = None
+        self._pending_approval_id: int | None = None
+        self._pending_approval_request: dict[str, Any] | None = None
         self._stream_buffer = ""
         self._started_at: float | None = None
         self._close_pending = False
@@ -224,6 +235,19 @@ class MainWindow(QMainWindow):
         self.max_steps_spin.setMinimumWidth(82)
         self.max_steps_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.max_steps_spin)
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("Safety Mode"))
+        self.safety_mode_combo = QComboBox()
+        self.safety_mode_combo.setObjectName("safetyModeCombo")
+        self.safety_mode_combo.addItem("Ask", SafetyMode.ASK.value)
+        self.safety_mode_combo.addItem("Auto Edit", SafetyMode.AUTO_EDIT.value)
+        self.safety_mode_combo.addItem("Auto", SafetyMode.AUTO.value)
+        self.safety_mode_combo.addItem("Read Only", SafetyMode.READ_ONLY.value)
+        self.safety_mode_combo.setToolTip(
+            "Ask：修改与命令均询问；Auto Edit：自动编辑但命令询问；"
+            "Auto：按 Runtime Policy 自动执行；Read Only：禁止修改和命令"
+        )
+        layout.addWidget(self.safety_mode_combo)
         self.new_session_button = QPushButton("New Session")
         self.new_session_button.clicked.connect(self.clear_conversation)
         layout.addWidget(self.new_session_button)
@@ -309,6 +333,48 @@ class MainWindow(QMainWindow):
         self.current_action_label.setObjectName("currentAction")
         self.current_action_label.setWordWrap(True)
         layout.addWidget(self.current_action_label)
+
+        self.approval_frame = QFrame()
+        self.approval_frame.setObjectName("approvalCard")
+        approval_layout = QVBoxLayout(self.approval_frame)
+        approval_layout.setContentsMargins(9, 8, 9, 8)
+        self.approval_label = QLabel()
+        self.approval_label.setWordWrap(True)
+        approval_layout.addWidget(self.approval_label)
+        approval_buttons = QHBoxLayout()
+        self.reject_button = QPushButton("Reject")
+        self.approve_button = QPushButton("Approve")
+        self.approve_button.setProperty("accent", True)
+        self.reject_button.clicked.connect(lambda: self._resolve_approval(False))
+        self.approve_button.clicked.connect(lambda: self._resolve_approval(True))
+        approval_buttons.addStretch(1)
+        approval_buttons.addWidget(self.reject_button)
+        approval_buttons.addWidget(self.approve_button)
+        approval_layout.addLayout(approval_buttons)
+        self.approval_frame.hide()
+        layout.addWidget(self.approval_frame)
+
+        self.evidence_frame = QFrame()
+        self.evidence_frame.setObjectName("evidenceCard")
+        evidence_layout = QVBoxLayout(self.evidence_frame)
+        evidence_layout.setContentsMargins(9, 8, 9, 8)
+        evidence_title = QLabel("TASK EVIDENCE")
+        evidence_title.setObjectName("evidenceTitle")
+        evidence_layout.addWidget(evidence_title)
+        self.evidence_summary = QLabel("等待任务完成后生成结构化证据。")
+        self.evidence_summary.setWordWrap(True)
+        evidence_layout.addWidget(self.evidence_summary)
+        evidence_buttons = QHBoxLayout()
+        self.export_trace_button = QPushButton("Export Trace")
+        self.replay_trace_button = QPushButton("Replay Trace")
+        self.export_trace_button.setEnabled(False)
+        self.export_trace_button.clicked.connect(self.export_trace)
+        self.replay_trace_button.clicked.connect(self.replay_trace)
+        evidence_buttons.addWidget(self.export_trace_button)
+        evidence_buttons.addWidget(self.replay_trace_button)
+        evidence_buttons.addStretch(1)
+        evidence_layout.addLayout(evidence_buttons)
+        layout.addWidget(self.evidence_frame)
         self.activity_list = QListWidget()
         self.activity_list.setObjectName("activityList")
         self.activity_list.setSpacing(5)
@@ -433,6 +499,15 @@ class MainWindow(QMainWindow):
         self._verification_guidance_item = None
         self._last_verification = VERIFICATION_NOT_REQUIRED
         self._last_run_state = None
+        self._evidence_snapshot = None
+        self._evidence_path = None
+        self._evidence_builder = EvidenceTrailBuilder(
+            self.workspace,
+            settings.model,
+            self.max_steps_spin.value(),
+        )
+        self.evidence_summary.setText("正在采集本次任务的 Runtime Evidence…")
+        self.export_trace_button.setEnabled(False)
         self._stream_buffer = ""
         self._set_verification(VERIFICATION_NOT_REQUIRED)
         self._set_running(True)
@@ -449,10 +524,12 @@ class MainWindow(QMainWindow):
             self.workspace,
             self.max_steps_spin.value(),
             self._client_factory,
+            SafetyMode(str(self.safety_mode_combo.currentData())),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.runtime_event.connect(self._on_runtime_event)
+        worker.approval_requested.connect(self._on_approval_requested)
         worker.result_ready.connect(self._on_agent_completed)
         worker.failed.connect(self._on_agent_failed)
         worker.finished.connect(thread.quit)
@@ -465,6 +542,8 @@ class MainWindow(QMainWindow):
 
     def _on_runtime_event(self, event: RuntimeEvent) -> None:
         """把框架无关 Runtime Event 转换成具体 Qt 界面更新。"""
+        if self._evidence_builder is not None:
+            self._evidence_builder.record(event)
         payload = event.payload
         if event.kind in {
             RuntimeEventKind.TOOL_STARTED,
@@ -586,11 +665,172 @@ class MainWindow(QMainWindow):
             if outcome == "verified":
                 self._verification_guidance_item = None
 
+    def _on_approval_requested(self, request: dict[str, Any]) -> None:
+        """显示非阻塞授权卡片；Worker 在 handler 启动前等待用户选择。"""
+        request_id = int(request.get("request_id", 0))
+        self._pending_approval_id = request_id
+        self._pending_approval_request = dict(request)
+        tool_name = str(request.get("tool_name", "tool"))
+        arguments = request.get("arguments", {})
+        details = json.dumps(arguments, ensure_ascii=False, indent=2)
+        preview = str(request.get("preview", ""))
+        preview_text = f"\n\nRequested change\n{preview}" if preview else ""
+        self.approval_label.setText(
+            f"Agent requests permission\n{tool_name}\n{details}{preview_text}"
+        )
+        self.approval_frame.show()
+        self.current_action_label.setText(
+            f"等待授权：{tool_name} 尚未执行"
+        )
+
+    def _resolve_approval(self, approved: bool) -> None:
+        """把用户决定送回 Worker，并在 Evidence Trail 中留下证据。"""
+        if self._worker is None or self._pending_approval_id is None:
+            return
+        request_id = self._pending_approval_id
+        request = self._pending_approval_request or {}
+        self._worker.resolve_approval(request_id, approved)
+        if self._evidence_builder is not None:
+            self._evidence_builder.record_approval(request, approved)
+        tool_name = str(request.get("tool_name", "tool"))
+        self._add_activity(
+            "APPROVAL",
+            "已批准工具执行" if approved else "已拒绝工具执行",
+            (
+                f"{tool_name} 现在可以由 Runtime 继续执行。"
+                if approved
+                else f"{tool_name} 没有执行，Agent 将收到拒绝结果。"
+            ),
+            json.dumps(request, ensure_ascii=False, indent=2),
+            "success" if approved else "warning",
+        )
+        self.approval_frame.hide()
+        self._pending_approval_id = None
+        self._pending_approval_request = None
+
+    def _finalize_evidence(
+        self,
+        *,
+        result: AgentResult | None = None,
+        error: str | None = None,
+    ) -> None:
+        """完成并自动保存当前任务 Trace；失败不会改变 AgentResult。"""
+        if self._evidence_builder is None:
+            return
+        snapshot = (
+            self._evidence_builder.finalize(result)
+            if result is not None
+            else self._evidence_builder.fail(error or "Worker failed")
+        )
+        self._evidence_snapshot = snapshot
+        self._evidence_builder = None
+        try:
+            self._evidence_path = self._evidence_store.save(snapshot)
+        except (OSError, ValueError) as save_error:
+            self._evidence_path = None
+            self._append_runtime(
+                f"Evidence Trail 保存失败：{save_error}", error=True
+            )
+        self._render_evidence_summary(snapshot)
+        self.export_trace_button.setEnabled(True)
+
+    def _render_evidence_summary(self, snapshot: dict[str, Any]) -> None:
+        verification = str(snapshot.get("verification", "not_required"))
+        verified_text = {
+            "verified": "✓ verification passed",
+            "failed": "✗ verification failed",
+            "unverified": "! verification pending",
+            "not_required": "– verification not required",
+        }.get(verification, f"– verification {verification}")
+        self.evidence_summary.setText(
+            f"✓ {snapshot.get('files_created', 0)} files created   "
+            f"✓ {snapshot.get('files_modified', 0)} files modified\n"
+            f"✓ {snapshot.get('directories_created', 0)} directories created   "
+            f"{verified_text}\n"
+            f"Steps {snapshot.get('steps', 0)}   "
+            f"Tool Calls {snapshot.get('tool_calls', 0)}   "
+            f"Duration {float(snapshot.get('duration', 0.0)):.1f}s\n"
+            f"Stop Reason: {snapshot.get('stop_reason', 'unknown')}"
+        )
+
+    def export_trace(self) -> None:
+        """把当前 Evidence Snapshot 导出为用户选择的 JSON 文件。"""
+        if self._evidence_snapshot is None:
+            return
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Evidence Trace",
+            str(self.workspace / "agent-evidence.json"),
+            "JSON files (*.json)",
+        )
+        if not selected:
+            return
+        try:
+            path = self._evidence_store.export(
+                self._evidence_snapshot, Path(selected)
+            )
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Export failed", str(error))
+            return
+        self._append_runtime(f"Evidence Trace 已导出：{path}")
+
+    def replay_trace(self) -> None:
+        """加载并只读渲染历史 Trace，不调用 LLM、工具或 Workspace。"""
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Replay Evidence Trace",
+            str(self._evidence_store.root),
+            "JSON files (*.json)",
+        )
+        if not selected:
+            return
+        try:
+            snapshot = self._evidence_store.load(Path(selected))
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            QMessageBox.warning(self, "Replay failed", str(error))
+            return
+        self._evidence_snapshot = snapshot
+        self._render_evidence_summary(snapshot)
+        self.export_trace_button.setEnabled(True)
+        self.activity_list.clear()
+        self._trace_items.clear()
+        self._trace_presentations.clear()
+        for record in snapshot.get("tools", []):
+            if not isinstance(record, dict):
+                continue
+            tool_name = str(record.get("tool", "tool"))
+            success = record.get("success") is True
+            error = record.get("error")
+            result_text = "✓ Completed" if success else f"✗ {error or 'Failed'}"
+            diff = str(record.get("diff", ""))
+            summary = result_text + (f"\n{diff}" if diff else "")
+            details = json.dumps(record, ensure_ascii=False, indent=2)
+            self._add_activity(
+                f"REPLAY · {tool_name}",
+                f"Step {record.get('step', 0)} · {tool_name}",
+                summary,
+                details,
+                "success" if success else "error",
+            )
+        self.current_action_label.setText(
+            "Replay：正在查看历史证据，不会执行任何工具"
+        )
+
     def stop_task(self) -> None:
         """请求协作式停止；正在等待的网络请求或命令返回后才会生效。"""
         if self._worker is None:
             return
+        if (
+            self._pending_approval_request is not None
+            and self._evidence_builder is not None
+        ):
+            self._evidence_builder.record_approval(
+                self._pending_approval_request, False
+            )
         self._worker.request_cancel()
+        self.approval_frame.hide()
+        self._pending_approval_id = None
+        self._pending_approval_request = None
         self.stop_button.setEnabled(False)
         self._set_agent_state("Stopping…")
         self._append_runtime("Stop requested; waiting for the current operation.")
@@ -670,17 +910,18 @@ class MainWindow(QMainWindow):
         action_summary = (
             call_presentation.summary if call_presentation is not None else ""
         )
-        change_preview = (
-            f"\n修改预览：\n{presentation.preview}"
-            if presentation.preview
-            else ""
-        )
-        item.setText(
-            f"步骤 {step}  ·  {action_title}  [{presentation.label}]\n"
-            f"{action_summary}\n"
-            f"结果：{presentation.title} — {presentation.summary}"
-            f"{change_preview}"
-        )
+        if presentation.preview:
+            item.setText(
+                f"步骤 {step}  ·  {action_title}  [{presentation.label}]\n"
+                f"{presentation.preview}\n"
+                f"✓ Applied — {presentation.summary}"
+            )
+        else:
+            item.setText(
+                f"步骤 {step}  ·  {action_title}  [{presentation.label}]\n"
+                f"{action_summary}\n"
+                f"结果：{presentation.title} — {presentation.summary}"
+            )
         existing = str(item.data(Qt.ItemDataRole.UserRole) or "")
         item.setData(
             Qt.ItemDataRole.UserRole,
@@ -712,6 +953,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_agent_completed(self, result: AgentResult) -> None:
+        self._finalize_evidence(result=result)
         self._last_run_state = {
             "stop_reason": result.stop_reason,
             "steps": result.steps,
@@ -781,6 +1023,7 @@ class MainWindow(QMainWindow):
         self._save_session()
 
     def _on_agent_failed(self, message: str) -> None:
+        self._finalize_evidence(error=message)
         self._last_run_state = {
             "stop_reason": "worker_error",
             "steps": 0,
@@ -806,6 +1049,9 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self._worker = None
         self._thread = None
+        self.approval_frame.hide()
+        self._pending_approval_id = None
+        self._pending_approval_request = None
         if self._close_pending:
             self._close_pending = False
             QTimer.singleShot(0, self.close)
@@ -942,6 +1188,11 @@ class MainWindow(QMainWindow):
         self.new_session_button.setEnabled(not running)
         self.clear_button.setEnabled(not running)
         self.clear_saved_sessions_button.setEnabled(not running)
+        self.safety_mode_combo.setEnabled(not running)
+        self.replay_trace_button.setEnabled(not running)
+        self.export_trace_button.setEnabled(
+            not running and self._evidence_snapshot is not None
+        )
 
     def _set_agent_state(self, state: str) -> None:
         self.agent_status.setText(f"Agent: {state}")
@@ -1176,8 +1427,11 @@ class MainWindow(QMainWindow):
                 font-family: "Microsoft YaHei UI", "Segoe UI", Arial, sans-serif;
             }}
             QFrame#topBar, QFrame#panel {{ background: {palette['surface']}; border: 1px solid {palette['border']}; border-radius: 7px; }}
+            QFrame#evidenceCard {{ background: {palette['input']}; border: 1px solid {palette['border']}; border-radius: 6px; }}
+            QFrame#approvalCard {{ background: {palette['selected']}; border: 1px solid {palette['accent']}; border-radius: 6px; }}
             QLabel#appTitle {{ color: {palette['bright']}; font-size: 18px; font-weight: 700; }}
             QLabel#panelTitle {{ color: {palette['muted']}; font-size: 11px; font-weight: 700; }}
+            QLabel#evidenceTitle {{ color: {palette['accent']}; font-size: 11px; font-weight: 700; }}
             QLabel#workspaceLabel, QLabel#modelLabel {{ color: {palette['accent']}; }}
             QLabel#mutedText {{ color: {palette['muted']}; font-size: 11px; }}
             QPushButton, QToolButton {{ background: {palette['button']}; border: 1px solid {palette['border']}; border-radius: 5px; padding: 6px 11px; }}
@@ -1185,10 +1439,11 @@ class MainWindow(QMainWindow):
             QPushButton:disabled {{ color: {palette['disabled']}; background: {palette['surface']}; }}
             QPushButton[accent="true"] {{ background: #238636; border-color: #2ea043; color: white; font-weight: 600; }}
             QPushButton[accent="true"]:hover {{ background: #2ea043; }}
-            QTextBrowser, QPlainTextEdit, QTreeView, QListWidget, QSpinBox {{
+            QTextBrowser, QPlainTextEdit, QTreeView, QListWidget, QSpinBox, QComboBox {{
                 background: {palette['input']}; border: 1px solid {palette['border']}; border-radius: 5px; color: {palette['text']};
                 selection-background-color: {palette['accent']};
             }}
+            QComboBox {{ min-height: 26px; padding: 0 7px; }}
             QSpinBox {{ min-height: 26px; padding-left: 6px; padding-right: 22px; }}
             QSpinBox::up-button, QSpinBox::down-button {{
                 subcontrol-origin: border; width: 20px; background: {palette['button']};

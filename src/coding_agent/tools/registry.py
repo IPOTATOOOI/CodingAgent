@@ -8,6 +8,7 @@ from pathlib import Path
 import types
 from typing import Any, get_args, get_origin, get_type_hints, Union
 
+from coding_agent.approval import ApprovalCallback
 from coding_agent.tools.command import (
     CommandTools,
     DEFAULT_TIMEOUT_SECONDS,
@@ -117,8 +118,9 @@ class ToolDefinition:
 class ToolRegistry:
     """注册、描述并安全分发本地工具。"""
 
-    def __init__(self) -> None:
+    def __init__(self, approval_callback: ApprovalCallback | None = None) -> None:
         self._tools: dict[str, ToolDefinition] = {}
+        self._approval_callback = approval_callback
 
     def register(self, definition: ToolDefinition) -> None:
         """注册一个工具定义。"""
@@ -157,6 +159,17 @@ class ToolRegistry:
         if validation_error is not None:
             return self._failure("InvalidArguments", validation_error)
 
+        if self._approval_callback is not None:
+            try:
+                decision = self._approval_callback(tool_name, dict(parsed))
+            except Exception:
+                return self._failure(
+                    "ApprovalError",
+                    "The tool approval callback failed before execution.",
+                )
+            if not decision.approved:
+                return self._failure(decision.error, decision.message)
+
         try:
             data = definition.handler(**parsed)
         except ToolError as error:
@@ -169,7 +182,7 @@ class ToolRegistry:
     def _validate_arguments(
         schema: dict[str, Any], arguments: dict[str, Any]
     ) -> str | None:
-        """验证当前六个工具所需的 JSON Schema 子集。"""
+        """验证当前内置工具所需的 JSON Schema 子集。"""
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         for name in required:
@@ -227,11 +240,12 @@ class ToolRegistry:
 def create_tool_registry(
     workspace_root: Path,
     should_cancel: Callable[[], bool] | None = None,
+    approval_callback: ApprovalCallback | None = None,
 ) -> ToolRegistry:
-    """为指定工作区创建六个本地工具。"""
+    """为指定工作区创建受边界和可选授权策略保护的本地工具。"""
     filesystem = FilesystemTools(workspace_root)
     commands = CommandTools(workspace_root, should_cancel=should_cancel)
-    registry = ToolRegistry()
+    registry = ToolRegistry(approval_callback=approval_callback)
     registry.register(
         ToolDefinition(
             name="list_directory",
@@ -315,6 +329,29 @@ def create_tool_registry(
                 "additionalProperties": False,
             },
             handler=filesystem.search_text,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="create_directory",
+            description=(
+                "Create a directory inside the current workspace. Missing parent "
+                "directories are created safely and reported in the result. Use this "
+                "for explicit project structure or empty directories; write_file can "
+                "still create its own missing parents."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "New directory path relative to the workspace root.",
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            handler=filesystem.create_directory,
         )
     )
     registry.register(

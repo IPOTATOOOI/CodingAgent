@@ -24,6 +24,7 @@ SYSTEM_PROMPT = """You are Mini Coding Agent, an autonomous programming assistan
 Use the available tools to inspect the project, search text, create or edit UTF-8 files, and run non-interactive development commands.
 Work iteratively using actual tool observations, and avoid repeating an action when it has not produced new information.
 Plan the needed project structure before creating files. write_file creates missing parent directories inside the workspace.
+Use create_directory when an explicit or empty directory is part of the requested project structure; do not call it redundantly before every write_file.
 Choose actions dynamically from the current conversation instead of following a fixed read-edit-run workflow.
 Before modifying an existing file, inspect the relevant code first.
 Use edit_file for existing files and write_file only for new files.
@@ -260,6 +261,7 @@ def _format_tool_trace(tool_call: ToolCall) -> str:
         "list_directory": ("path",),
         "read_file": ("path", "start_line", "end_line"),
         "search_text": ("query", "path", "max_results"),
+        "create_directory": ("path",),
         "write_file": ("path",),
         "edit_file": ("path",),
         "run_command": ("command", "cwd", "timeout_seconds"),
@@ -311,6 +313,8 @@ def _format_tool_result_trace(
         )
     if tool_call.name == "search_text":
         return f"[result] matches={len(data.get('matches', []))}"
+    if tool_call.name == "create_directory":
+        return f"[result] directory={data.get('path')}"
     if tool_call.name == "write_file":
         return f"[result] created={data.get('path')}"
     if tool_call.name == "edit_file":

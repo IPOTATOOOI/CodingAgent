@@ -12,6 +12,7 @@ TOOL_LABELS = {
     "read_file": "Read",
     "search_text": "Search",
     "list_directory": "List",
+    "create_directory": "Create Dir",
     "write_file": "Create",
     "edit_file": "Edit",
     "run_command": "Run",
@@ -55,6 +56,9 @@ def format_tool_call(tool_call: ToolCall) -> TracePresentation:
         location = "整个项目" if path == "." else path
         title = "在项目中搜索代码"
         summary = f"在 {location} 中查找“{query}”，快速定位相关实现。"
+    elif tool_call.name == "create_directory":
+        title = f"创建项目目录 {path}"
+        summary = "显式建立项目结构；缺失的父目录也会安全地补齐。"
     elif tool_call.name == "write_file":
         title = f"创建新文件 {path}"
         summary = "为任务添加一个新的项目文件；现有文件不会被覆盖。"
@@ -136,6 +140,11 @@ def format_tool_result(
         else:
             title = "没有找到匹配内容"
             summary = "当前关键词没有结果，Agent 需要调整搜索方式。"
+    elif tool_call.name == "create_directory":
+        created = data.get("created_directories", [])
+        count = len(created) if isinstance(created, list) else 1
+        title = "项目目录创建成功"
+        summary = f"已经创建 {path}，本次实际补齐 {count} 层目录。"
     elif tool_call.name == "write_file":
         title = "新文件创建成功"
         summary = f"已经创建 {path}；如果它属于代码，后续还需要运行验证。"
@@ -245,6 +254,21 @@ def _friendly_error(error: str) -> tuple[str, str, str]:
             "创建操作没有覆盖现有文件，Agent 应改用 Edit 或选择新路径。",
             "warning",
         ),
+        "DirectoryAlreadyExists": (
+            "目录已经存在",
+            "Runtime 没有覆盖现有目录，Agent 可以直接继续使用它。",
+            "warning",
+        ),
+        "ApprovalRejected": (
+            "用户拒绝了这一步",
+            "工具尚未执行，Agent 会收到拒绝结果并调整方案。",
+            "warning",
+        ),
+        "ReadOnlyMode": (
+            "只读模式已阻止这一步",
+            "当前 Safety Mode 不允许修改文件或运行命令，工具没有执行。",
+            "warning",
+        ),
         "PathOutsideWorkspace": (
             "操作超出 Workspace",
             "安全边界拒绝了 Workspace 之外的路径。",
@@ -277,9 +301,13 @@ def _edit_diff(
             lineterm="",
         )
     )
-    body = [line for line in raw_lines if not line.startswith("@@")]
+    body = [
+        line
+        for line in raw_lines
+        if not line.startswith(("@@", "---", "+++"))
+    ]
     location = _edit_location(data).lstrip("，") or "修改片段"
-    lines = [location, *body]
+    lines = [f"@@ {location} @@", *body]
     return (
         _bounded_diff(lines, max_lines=9, max_chars=1200),
         _bounded_diff(lines, max_lines=80, max_chars=8000),
@@ -291,7 +319,7 @@ def _create_preview(
     path: str,
 ) -> tuple[str, str]:
     content = str(arguments.get("content", ""))
-    lines = [f"{path}：原文件不存在 → 创建新文件"]
+    lines = ["@@ 新建文件 @@", f"{path}：原文件不存在 → 创建新文件"]
     lines.extend(f"+ {line}" for line in content.splitlines())
     if not content:
         lines.append("+ <空文件>")
