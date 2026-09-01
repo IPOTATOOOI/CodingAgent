@@ -85,6 +85,20 @@ LIGHT_TONE_COLORS = {
     "error": QColor("#cf222e"),
     "info": QColor("#0969da"),
 }
+TONE_BACKGROUNDS = {
+    "normal": QColor("#151b23"),
+    "success": QColor("#12261e"),
+    "warning": QColor("#2b2111"),
+    "error": QColor("#2f171c"),
+    "info": QColor("#13233a"),
+}
+LIGHT_TONE_BACKGROUNDS = {
+    "normal": QColor("#ffffff"),
+    "success": QColor("#dafbe1"),
+    "warning": QColor("#fff8c5"),
+    "error": QColor("#ffebe9"),
+    "info": QColor("#ddf4ff"),
+}
 VERIFICATION_TEXT = {
     VERIFICATION_NOT_REQUIRED: "无需验证",
     VERIFICATION_UNVERIFIED: "等待验证",
@@ -92,10 +106,114 @@ VERIFICATION_TEXT = {
     VERIFICATION_VERIFIED: "验证通过",
 }
 
+AGENT_STATE_TEXT = {
+    "Ready": "就绪",
+    "Running": "运行中",
+    "Completed": "已完成",
+    "Failed": "失败",
+    "Needs Verification": "等待验证",
+    "Stopping…": "正在停止…",
+}
+
+STOP_REASON_LABELS = {
+    "completed": "正常完成",
+    "interrupted": "用户中断",
+    "max_steps": "达到最大步骤数",
+    "no_progress": "连续多步没有有效进展",
+    "verification_required": "仍需验证",
+    "llm_error": "模型请求失败",
+    "invalid_response": "模型响应无效",
+    "worker_error": "后台任务异常",
+    "unknown": "未知",
+}
+
+
+def trace_details_to_html(details: str, theme: str = "dark") -> str:
+    """把原始 Trace 文本渲染成安全、有配色的只读详情。"""
+    palette = (
+        {
+            "background": "#ffffff",
+            "text": "#24292f",
+            "muted": "#57606a",
+            "border": "#d0d7de",
+            "add_text": "#116329",
+            "add_background": "#dafbe1",
+            "delete_text": "#82071e",
+            "delete_background": "#ffebe9",
+            "hunk_text": "#0550ae",
+            "hunk_background": "#ddf4ff",
+            "section_background": "#f6f8fa",
+        }
+        if theme == "light"
+        else {
+            "background": "#0d1117",
+            "text": "#e6edf3",
+            "muted": "#8b949e",
+            "border": "#30363d",
+            "add_text": "#aff5b4",
+            "add_background": "#12261e",
+            "delete_text": "#ffdcd7",
+            "delete_background": "#321c20",
+            "hunk_text": "#a5d6ff",
+            "hunk_background": "#13233a",
+            "section_background": "#161b22",
+        }
+    )
+    section_titles = {
+        "这一步在做什么",
+        "技术参数",
+        "执行结果",
+        "修改内容",
+        "参数",
+        "Runtime 信息",
+        "标准输出预览",
+        "错误输出预览",
+    }
+    rendered_lines: list[str] = []
+    for line in details.splitlines() or [""]:
+        stripped = line.strip()
+        if line.startswith("+") and not line.startswith("+++"):
+            css_class = "addition"
+        elif line.startswith("-") and not line.startswith("---"):
+            css_class = "deletion"
+        elif line.startswith("@@"):
+            css_class = "hunk"
+        elif stripped.rstrip("：") in section_titles or any(
+            stripped.startswith(f"{title}：") for title in section_titles
+        ):
+            css_class = "section"
+        elif line.startswith(("+++", "---")):
+            css_class = "metadata"
+        else:
+            css_class = "line"
+        visible = escape(line) if line else "&nbsp;"
+        rendered_lines.append(f'<div class="{css_class}">{visible}</div>')
+
+    return f"""
+    <html><head><style>
+      body {{ margin: 0; background: {palette['background']}; color: {palette['text']};
+              font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei UI', monospace;
+              font-size: 13px; }}
+      .line, .addition, .deletion, .hunk, .metadata, .section {{
+              white-space: pre; padding: 3px 12px; }}
+      .addition {{ color: {palette['add_text']}; background: {palette['add_background']};
+                   border-left: 3px solid #2da44e; }}
+      .deletion {{ color: {palette['delete_text']}; background: {palette['delete_background']};
+                   border-left: 3px solid #cf222e; }}
+      .hunk {{ color: {palette['hunk_text']}; background: {palette['hunk_background']};
+               border-left: 3px solid #218bff; font-weight: 600; }}
+      .metadata {{ color: {palette['muted']}; font-weight: 600; }}
+      .section {{ margin-top: 8px; color: {palette['text']};
+                  background: {palette['section_background']};
+                  border-top: 1px solid {palette['border']};
+                  border-bottom: 1px solid {palette['border']}; font-weight: 700; }}
+    </style></head><body>{''.join(rendered_lines)}</body></html>
+    """
+
 STOP_REASON_TEXT = {
     "max_steps": (
         "已达到最大步骤数",
-        "Agent 已停止继续操作；当前结果可能已经完成，也可能仍需要人工检查。",
+        "智能体已停止继续操作；当前结果可能已经完成，也可能仍需要人工检查。",
     ),
     "no_progress": (
         "连续多步没有有效进展",
@@ -103,7 +221,7 @@ STOP_REASON_TEXT = {
     ),
     "verification_required": (
         "最新代码尚未通过验证",
-        "Agent 多次尝试结束任务，但仍没有取得 Runtime 能确认的测试或检查结果。",
+        "智能体多次尝试结束任务，但仍没有取得 Runtime 能确认的测试或检查结果。",
     ),
     "llm_error": (
         "模型请求失败",
@@ -200,31 +318,68 @@ class MainWindow(QMainWindow):
     def _build_top_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("topBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(14, 9, 14, 9)
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(10)
 
+        primary = QHBoxLayout()
+        primary.setSpacing(10)
+        app_mark = QLabel("MC")
+        app_mark.setObjectName("appMark")
+        app_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        app_mark.setFixedSize(38, 38)
+        primary.addWidget(app_mark)
+
+        brand = QVBoxLayout()
+        brand.setSpacing(1)
         title = QLabel("Mini Coding Agent")
         title.setObjectName("appTitle")
-        layout.addWidget(title)
-        layout.addSpacing(18)
+        subtitle = QLabel("本地可观察的智能编码工作台")
+        subtitle.setObjectName("appSubtitle")
+        brand.addWidget(title)
+        brand.addWidget(subtitle)
+        primary.addLayout(brand)
+        primary.addSpacing(24)
 
-        layout.addWidget(QLabel("Workspace"))
+        workspace_group = QVBoxLayout()
+        workspace_group.setSpacing(1)
+        workspace_caption = QLabel("当前工作区")
+        workspace_caption.setObjectName("fieldCaption")
+        workspace_group.addWidget(workspace_caption)
         self.workspace_label = QLabel()
         self.workspace_label.setObjectName("workspaceLabel")
         self.workspace_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.workspace_label, 1)
-        self.choose_workspace_button = QPushButton("Choose…")
+        workspace_group.addWidget(self.workspace_label)
+        primary.addLayout(workspace_group, 1)
+        self.choose_workspace_button = QPushButton("选择工作区")
         self.choose_workspace_button.setObjectName("chooseWorkspaceButton")
         self.choose_workspace_button.clicked.connect(self.choose_workspace)
-        layout.addWidget(self.choose_workspace_button)
+        primary.addWidget(self.choose_workspace_button)
+        self.theme_button = QToolButton()
+        self.theme_button.setObjectName("themeButton")
+        self.theme_button.setFixedSize(38, 34)
+        self.theme_button.clicked.connect(self.toggle_theme)
+        primary.addWidget(self.theme_button)
+        layout.addLayout(primary)
 
-        layout.addSpacing(14)
-        layout.addWidget(QLabel("Model"))
+        divider = QFrame()
+        divider.setObjectName("topDivider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(divider)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+
+        model_caption = QLabel("模型")
+        model_caption.setObjectName("fieldCaption")
+        controls.addWidget(model_caption)
         self.model_label = QLabel(self._model_name())
         self.model_label.setObjectName("modelLabel")
-        layout.addWidget(self.model_label)
-        layout.addSpacing(12)
-        layout.addWidget(QLabel("Max Steps"))
+        controls.addWidget(self.model_label)
+        controls.addSpacing(12)
+        steps_caption = QLabel("最大步骤")
+        steps_caption.setObjectName("fieldCaption")
+        controls.addWidget(steps_caption)
         self.max_steps_spin = QSpinBox()
         self.max_steps_spin.setObjectName("maxStepsSpin")
         self.max_steps_spin.setRange(MIN_MAX_STEPS, QT_SPINBOX_MAXIMUM)
@@ -234,44 +389,43 @@ class MainWindow(QMainWindow):
         )
         self.max_steps_spin.setMinimumWidth(82)
         self.max_steps_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.max_steps_spin)
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Safety Mode"))
+        controls.addWidget(self.max_steps_spin)
+        controls.addSpacing(12)
+        safety_caption = QLabel("安全模式")
+        safety_caption.setObjectName("fieldCaption")
+        controls.addWidget(safety_caption)
         self.safety_mode_combo = QComboBox()
         self.safety_mode_combo.setObjectName("safetyModeCombo")
-        self.safety_mode_combo.addItem("Ask", SafetyMode.ASK.value)
-        self.safety_mode_combo.addItem("Auto Edit", SafetyMode.AUTO_EDIT.value)
-        self.safety_mode_combo.addItem("Auto", SafetyMode.AUTO.value)
-        self.safety_mode_combo.addItem("Read Only", SafetyMode.READ_ONLY.value)
+        self.safety_mode_combo.addItem("询问", SafetyMode.ASK.value)
+        self.safety_mode_combo.addItem("自动编辑", SafetyMode.AUTO_EDIT.value)
+        self.safety_mode_combo.addItem("全自动", SafetyMode.AUTO.value)
+        self.safety_mode_combo.addItem("只读", SafetyMode.READ_ONLY.value)
         self.safety_mode_combo.setToolTip(
-            "Ask：修改与命令均询问；Auto Edit：自动编辑但命令询问；"
-            "Auto：按 Runtime Policy 自动执行；Read Only：禁止修改和命令"
+            "询问：修改与命令均需确认；自动编辑：文件修改自动执行、命令需确认；"
+            "全自动：按 Runtime Policy 自动执行；只读：禁止修改文件和运行命令"
         )
-        layout.addWidget(self.safety_mode_combo)
-        self.new_session_button = QPushButton("New Session")
+        controls.addWidget(self.safety_mode_combo)
+        controls.addStretch(1)
+        self.new_session_button = QPushButton("新建会话")
         self.new_session_button.clicked.connect(self.clear_conversation)
-        layout.addWidget(self.new_session_button)
-        self.auto_save_checkbox = QCheckBox("Auto-save")
+        controls.addWidget(self.new_session_button)
+        self.auto_save_checkbox = QCheckBox("自动保存")
         self.auto_save_checkbox.setChecked(True)
         self.auto_save_checkbox.setToolTip(
-            "任务结束后在后台保存当前 Workspace 的有界会话快照"
+            "任务结束后在后台保存当前工作区的有界会话快照"
         )
-        layout.addWidget(self.auto_save_checkbox)
-        self.clear_saved_sessions_button = QPushButton("Clear Saved")
-        self.clear_saved_sessions_button.setToolTip("删除全部 Workspace 的已保存会话")
+        controls.addWidget(self.auto_save_checkbox)
+        self.clear_saved_sessions_button = QPushButton("清除存档")
+        self.clear_saved_sessions_button.setToolTip("删除全部工作区的已保存会话")
         self.clear_saved_sessions_button.clicked.connect(
             self.clear_all_saved_sessions
         )
-        layout.addWidget(self.clear_saved_sessions_button)
-        self.theme_button = QToolButton()
-        self.theme_button.setObjectName("themeButton")
-        self.theme_button.setFixedSize(34, 30)
-        self.theme_button.clicked.connect(self.toggle_theme)
-        layout.addWidget(self.theme_button)
+        controls.addWidget(self.clear_saved_sessions_button)
+        layout.addLayout(controls)
         return bar
 
     def _build_project_panel(self) -> QWidget:
-        panel, layout = self._panel("PROJECT")
+        panel, layout = self._panel("项目文件", "project")
         self.file_model = QFileSystemModel(self)
         self.file_model.setFilter(
             QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot
@@ -287,52 +441,86 @@ class MainWindow(QMainWindow):
         for column in range(1, 4):
             self.project_tree.hideColumn(column)
         layout.addWidget(self.project_tree, 1)
-        hint = QLabel("Double-click a text file to preview")
+        hint = QLabel("双击文本文件可预览内容")
         hint.setObjectName("mutedText")
         layout.addWidget(hint)
         return panel
 
     def _build_conversation_panel(self) -> QWidget:
-        panel, layout = self._panel("CONVERSATION")
+        panel, layout = self._panel("对话", "conversation")
         self.conversation_view = QTextBrowser()
         self.conversation_view.setObjectName("conversationView")
         self.conversation_view.setOpenExternalLinks(False)
         layout.addWidget(self.conversation_view, 1)
 
+        composer = QFrame()
+        composer.setObjectName("taskComposer")
+        composer_layout = QVBoxLayout(composer)
+        composer_layout.setContentsMargins(10, 9, 10, 9)
+        composer_layout.setSpacing(7)
+        composer_header = QHBoxLayout()
+        composer_title = QLabel("向智能体描述任务")
+        composer_title.setObjectName("composerTitle")
+        composer_hint = QLabel("支持多行输入 · 运行时可补充指令")
+        composer_hint.setObjectName("mutedText")
+        composer_header.addWidget(composer_title)
+        composer_header.addStretch(1)
+        composer_header.addWidget(composer_hint)
+        composer_layout.addLayout(composer_header)
+
         self.task_input = QPlainTextEdit()
         self.task_input.setObjectName("taskInput")
         self.task_input.setPlaceholderText(
-            "Fix the failing tests, repair the implementation and verify the result."
+            "例如：运行项目测试，定位并修复失败的实现，然后验证结果。"
         )
         self.task_input.setMaximumHeight(120)
-        layout.addWidget(self.task_input)
+        composer_layout.addWidget(self.task_input)
 
         buttons = QHBoxLayout()
-        self.run_button = QPushButton("Run Task")
+        self.run_button = QPushButton("运行任务")
         self.run_button.setObjectName("runTaskButton")
         self.run_button.setProperty("accent", True)
         self.run_button.clicked.connect(self.run_task)
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton("停止")
         self.stop_button.setObjectName("stopButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_task)
-        self.clear_button = QPushButton("Clear Conversation")
+        self.clear_button = QPushButton("清空对话")
         self.clear_button.setObjectName("clearConversationButton")
         self.clear_button.clicked.connect(self.clear_conversation)
         buttons.addWidget(self.run_button)
         buttons.addWidget(self.stop_button)
         buttons.addStretch(1)
         buttons.addWidget(self.clear_button)
-        layout.addLayout(buttons)
-        self._append_runtime("Ready. Choose a workspace and describe a coding task.")
+        composer_layout.addLayout(buttons)
+        layout.addWidget(composer)
+        self._append_runtime("已就绪。请选择工作区并描述编码任务。")
         return panel
 
     def _build_activity_panel(self) -> QWidget:
-        panel, layout = self._panel("AGENT ACTIVITY / EXECUTION TRACE")
+        panel, layout = self._panel("智能体活动 / 执行轨迹", "activity")
+        current_frame = QFrame()
+        current_frame.setObjectName("currentActionCard")
+        current_layout = QHBoxLayout(current_frame)
+        current_layout.setContentsMargins(10, 8, 10, 8)
+        current_layout.setSpacing(8)
+        self.current_action_dot = QLabel("●")
+        self.current_action_dot.setObjectName("currentActionDot")
+        self.current_action_dot.setProperty("state", "Ready")
+        current_layout.addWidget(
+            self.current_action_dot, 0, Qt.AlignmentFlag.AlignTop
+        )
+        current_text_layout = QVBoxLayout()
+        current_text_layout.setSpacing(2)
+        current_caption = QLabel("实时状态")
+        current_caption.setObjectName("fieldCaption")
+        current_text_layout.addWidget(current_caption)
         self.current_action_label = QLabel("当前状态：等待任务")
         self.current_action_label.setObjectName("currentAction")
         self.current_action_label.setWordWrap(True)
-        layout.addWidget(self.current_action_label)
+        current_text_layout.addWidget(self.current_action_label)
+        current_layout.addLayout(current_text_layout, 1)
+        layout.addWidget(current_frame)
 
         self.approval_frame = QFrame()
         self.approval_frame.setObjectName("approvalCard")
@@ -342,8 +530,8 @@ class MainWindow(QMainWindow):
         self.approval_label.setWordWrap(True)
         approval_layout.addWidget(self.approval_label)
         approval_buttons = QHBoxLayout()
-        self.reject_button = QPushButton("Reject")
-        self.approve_button = QPushButton("Approve")
+        self.reject_button = QPushButton("拒绝")
+        self.approve_button = QPushButton("批准")
         self.approve_button.setProperty("accent", True)
         self.reject_button.clicked.connect(lambda: self._resolve_approval(False))
         self.approve_button.clicked.connect(lambda: self._resolve_approval(True))
@@ -358,15 +546,21 @@ class MainWindow(QMainWindow):
         self.evidence_frame.setObjectName("evidenceCard")
         evidence_layout = QVBoxLayout(self.evidence_frame)
         evidence_layout.setContentsMargins(9, 8, 9, 8)
-        evidence_title = QLabel("TASK EVIDENCE")
+        evidence_header = QHBoxLayout()
+        evidence_title = QLabel("任务证据")
         evidence_title.setObjectName("evidenceTitle")
-        evidence_layout.addWidget(evidence_title)
+        evidence_badge = QLabel("自动记录")
+        evidence_badge.setObjectName("evidenceBadge")
+        evidence_header.addWidget(evidence_title)
+        evidence_header.addStretch(1)
+        evidence_header.addWidget(evidence_badge)
+        evidence_layout.addLayout(evidence_header)
         self.evidence_summary = QLabel("等待任务完成后生成结构化证据。")
         self.evidence_summary.setWordWrap(True)
         evidence_layout.addWidget(self.evidence_summary)
         evidence_buttons = QHBoxLayout()
-        self.export_trace_button = QPushButton("Export Trace")
-        self.replay_trace_button = QPushButton("Replay Trace")
+        self.export_trace_button = QPushButton("导出轨迹")
+        self.replay_trace_button = QPushButton("回放轨迹")
         self.export_trace_button.setEnabled(False)
         self.export_trace_button.clicked.connect(self.export_trace)
         self.replay_trace_button.clicked.connect(self.replay_trace)
@@ -375,6 +569,15 @@ class MainWindow(QMainWindow):
         evidence_buttons.addStretch(1)
         evidence_layout.addLayout(evidence_buttons)
         layout.addWidget(self.evidence_frame)
+        timeline_header = QHBoxLayout()
+        timeline_title = QLabel("执行时间线")
+        timeline_title.setObjectName("timelineTitle")
+        timeline_hint = QLabel("点击任意步骤查看详情")
+        timeline_hint.setObjectName("mutedText")
+        timeline_header.addWidget(timeline_title)
+        timeline_header.addStretch(1)
+        timeline_header.addWidget(timeline_hint)
+        layout.addLayout(timeline_header)
         self.activity_list = QListWidget()
         self.activity_list.setObjectName("activityList")
         self.activity_list.setSpacing(5)
@@ -382,6 +585,9 @@ class MainWindow(QMainWindow):
         self.activity_list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.activity_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.activity_list.setUniformItemSizes(False)
+        self.activity_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.activity_list.itemClicked.connect(self.show_trace_details)
         layout.addWidget(self.activity_list, 1)
         hint = QLabel("点击步骤可查看真实命令、参数、退出码和有界输出")
@@ -390,23 +596,43 @@ class MainWindow(QMainWindow):
         return panel
 
     @staticmethod
-    def _panel(title: str) -> tuple[QFrame, QVBoxLayout]:
+    def _panel(title: str, section: str) -> tuple[QFrame, QVBoxLayout]:
         panel = QFrame()
         panel.setObjectName("panel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(11, 10, 11, 11)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        accent = QFrame()
+        accent.setObjectName("panelAccent")
+        accent.setProperty("section", section)
+        accent.setFixedSize(4, 17)
+        header.addWidget(accent)
         label = QLabel(title)
         label.setObjectName("panelTitle")
-        layout.addWidget(label)
+        label.setProperty("section", section)
+        header.addWidget(label)
+        header.addStretch(1)
+        layout.addLayout(header)
         return panel, layout
 
     def _build_status_bar(self) -> None:
         status = QStatusBar(self)
-        self.agent_status = QLabel("Agent: Ready")
-        self.steps_status = QLabel(f"Steps: 0 / {self.max_steps_spin.value()}")
-        self.verification_status = QLabel("Verification: Not Required")
-        self.tools_status = QLabel("Tool Calls: 0")
-        self.elapsed_status = QLabel("Elapsed: 0.0s")
+        self.agent_status = QLabel("智能体：就绪")
+        self.agent_status.setObjectName("agentStatus")
+        self.agent_status.setProperty("state", "Ready")
+        self.steps_status = QLabel(f"步骤：0 / {self.max_steps_spin.value()}")
+        self.steps_status.setObjectName("stepsStatus")
+        self.verification_status = QLabel("验证：无需验证")
+        self.verification_status.setObjectName("verificationStatus")
+        self.verification_status.setProperty(
+            "verification", VERIFICATION_NOT_REQUIRED
+        )
+        self.tools_status = QLabel("工具调用：0")
+        self.tools_status.setObjectName("toolsStatus")
+        self.elapsed_status = QLabel("耗时：0.0 秒")
+        self.elapsed_status.setObjectName("elapsedStatus")
         for widget in (
             self.agent_status,
             self.steps_status,
@@ -435,7 +661,7 @@ class MainWindow(QMainWindow):
     def choose_workspace(self) -> None:
         selected = QFileDialog.getExistingDirectory(
             self,
-            "Choose Workspace",
+            "选择工作区",
             str(self.workspace),
         )
         if selected:
@@ -452,11 +678,11 @@ class MainWindow(QMainWindow):
         try:
             content = read_preview_text(self.workspace, path)
         except (OSError, ValueError, UnicodeError) as error:
-            QMessageBox.information(self, "Preview unavailable", str(error))
+            QMessageBox.information(self, "无法预览", str(error))
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Preview — {path.name}")
+        dialog.setWindowTitle(f"文件预览 — {path.name}")
         dialog.resize(820, 620)
         layout = QVBoxLayout(dialog)
         editor = QPlainTextEdit(content)
@@ -474,7 +700,7 @@ class MainWindow(QMainWindow):
             self.task_input.clear()
             self._append_message("USER STEERING", task, "#1f6feb")
             self._add_activity(
-                "UPDATE",
+                "补充指令",
                 "已收到补充指令",
                 "这条指令会在当前操作结束后的下一个决策步骤生效。",
                 task,
@@ -486,7 +712,7 @@ class MainWindow(QMainWindow):
         try:
             settings = self._settings or Settings.from_env()
         except ConfigurationError as error:
-            self._append_runtime(f"Configuration error: {error}", error=True)
+            self._append_runtime(f"配置错误：{error}", error=True)
             self._set_agent_state("Failed")
             return
 
@@ -506,12 +732,12 @@ class MainWindow(QMainWindow):
             settings.model,
             self.max_steps_spin.value(),
         )
-        self.evidence_summary.setText("正在采集本次任务的 Runtime Evidence…")
+        self.evidence_summary.setText("正在采集本次任务的 Runtime 证据…")
         self.export_trace_button.setEnabled(False)
         self._stream_buffer = ""
         self._set_verification(VERIFICATION_NOT_REQUIRED)
         self._set_running(True)
-        self.current_action_label.setText("当前状态：正在启动 Agent…")
+        self.current_action_label.setText("当前状态：正在启动智能体…")
         self._started_at = time.monotonic()
         self._elapsed_timer.start()
         self._set_agent_state("Running")
@@ -572,10 +798,10 @@ class MainWindow(QMainWindow):
         elif event.kind == RuntimeEventKind.STEP_STARTED:
             self._stream_buffer = ""
             self.steps_status.setText(
-                f"Steps: {event.step or 0} / {self.max_steps_spin.value()}"
+                f"步骤：{event.step or 0} / {self.max_steps_spin.value()}"
             )
             self.current_action_label.setText(
-                f"步骤 {event.step or 0}：Agent 正在分析下一步…"
+                f"步骤 {event.step or 0}：智能体正在分析下一步…"
             )
         elif event.kind == RuntimeEventKind.LLM_REQUEST_STARTED:
             self.current_action_label.setText(
@@ -590,7 +816,7 @@ class MainWindow(QMainWindow):
             dropped = int(payload.get("dropped_groups", 0))
             if compacted or dropped:
                 self._add_activity(
-                    "CONTEXT",
+                    "上下文",
                     "已自动整理较早的上下文",
                     f"压缩 {compacted} 个旧工具结果，省略 {dropped} 组较早消息。",
                     str(payload),
@@ -599,14 +825,14 @@ class MainWindow(QMainWindow):
         elif event.kind == RuntimeEventKind.PROGRESS_WARNING:
             count = int(payload.get("inspection_calls", 0))
             self._add_activity(
-                "PROGRESS",
+                "进度提醒",
                 "读取较多，但还没有采取下一步行动",
-                f"自上次修改或命令执行后已查看 {count} 次；Runtime 已提醒 Agent 汇总信息、修改、验证或完成任务。",
+                f"自上次修改或命令执行后已查看 {count} 次；Runtime 已提醒智能体汇总信息、修改、验证或完成任务。",
                 str(payload),
                 "warning",
             )
             self.current_action_label.setText(
-                "已提醒 Agent：停止重复查看并采取具体行动"
+                "已提醒智能体：停止重复查看并采取具体行动"
             )
         elif event.kind == RuntimeEventKind.VERIFICATION_CHANGED:
             reminder = int(payload.get("reminder", 0))
@@ -620,13 +846,13 @@ class MainWindow(QMainWindow):
             )
             if reminder > 0:
                 progress = f"{reminder}/{maximum}" if maximum > 0 else str(reminder)
-                title = "Agent 想结束，但代码还没有验证"
+                title = "智能体想结束，但代码还没有验证"
                 summary = (
                     f"Runtime 已拒绝这次完成请求（验证提醒 {progress}）。"
                     f"仍待验证：{pending or '请查看详情'}。"
                 )
                 self.current_action_label.setText(
-                    f"验证提醒 {progress}：任务尚未完成，Agent 将继续处理"
+                    f"验证提醒 {progress}：任务尚未完成，智能体将继续处理"
                 )
             elif outcome == "partial":
                 title = "部分文件已经验证"
@@ -634,7 +860,7 @@ class MainWindow(QMainWindow):
             elif outcome == "no_coverage":
                 title = "检查命令没有覆盖待验证文件"
                 summary = (
-                    f"Agent 选错了检查目标；仍待验证：{pending or '请查看详情'}。"
+                    f"智能体选错了检查目标；仍待验证：{pending or '请查看详情'}。"
                 )
             elif (
                 outcome == "verified"
@@ -647,20 +873,21 @@ class MainWindow(QMainWindow):
                 summary = f"当前仍待验证：{pending}。"
             else:
                 return
-            text = f"{title}  [VERIFY]\n{summary}"
+            text = f"{title}  [验证]\n{summary}"
             tone = "success" if outcome == "verified" else "warning"
             if self._verification_guidance_item is None:
                 self._verification_guidance_item = self._add_activity(
-                    "VERIFY", title, summary, str(payload), tone
+                    "验证", title, summary, str(payload), tone
                 )
             else:
                 self._verification_guidance_item.setText(text)
                 self._verification_guidance_item.setData(
                     Qt.ItemDataRole.UserRole, str(payload)
                 )
-                self._verification_guidance_item.setForeground(
-                    self._tone_color(tone)
+                self._verification_guidance_item.setData(
+                    Qt.ItemDataRole.UserRole + 1, tone
                 )
+                self._style_trace_item(self._verification_guidance_item, tone)
                 self.activity_list.scrollToItem(self._verification_guidance_item)
             if outcome == "verified":
                 self._verification_guidance_item = None
@@ -674,9 +901,9 @@ class MainWindow(QMainWindow):
         arguments = request.get("arguments", {})
         details = json.dumps(arguments, ensure_ascii=False, indent=2)
         preview = str(request.get("preview", ""))
-        preview_text = f"\n\nRequested change\n{preview}" if preview else ""
+        preview_text = f"\n\n请求修改内容\n{preview}" if preview else ""
         self.approval_label.setText(
-            f"Agent requests permission\n{tool_name}\n{details}{preview_text}"
+            f"智能体请求授权\n{tool_name}\n{details}{preview_text}"
         )
         self.approval_frame.show()
         self.current_action_label.setText(
@@ -694,12 +921,12 @@ class MainWindow(QMainWindow):
             self._evidence_builder.record_approval(request, approved)
         tool_name = str(request.get("tool_name", "tool"))
         self._add_activity(
-            "APPROVAL",
+            "授权",
             "已批准工具执行" if approved else "已拒绝工具执行",
             (
                 f"{tool_name} 现在可以由 Runtime 继续执行。"
                 if approved
-                else f"{tool_name} 没有执行，Agent 将收到拒绝结果。"
+                else f"{tool_name} 没有执行，智能体将收到拒绝结果。"
             ),
             json.dumps(request, ensure_ascii=False, indent=2),
             "success" if approved else "warning",
@@ -720,7 +947,7 @@ class MainWindow(QMainWindow):
         snapshot = (
             self._evidence_builder.finalize(result)
             if result is not None
-            else self._evidence_builder.fail(error or "Worker failed")
+            else self._evidence_builder.fail(error or "后台任务失败")
         )
         self._evidence_snapshot = snapshot
         self._evidence_builder = None
@@ -729,28 +956,37 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as save_error:
             self._evidence_path = None
             self._append_runtime(
-                f"Evidence Trail 保存失败：{save_error}", error=True
+                f"证据轨迹保存失败：{save_error}", error=True
             )
         self._render_evidence_summary(snapshot)
         self.export_trace_button.setEnabled(True)
 
     def _render_evidence_summary(self, snapshot: dict[str, Any]) -> None:
         verification = str(snapshot.get("verification", "not_required"))
-        verified_text = {
-            "verified": "✓ verification passed",
-            "failed": "✗ verification failed",
-            "unverified": "! verification pending",
-            "not_required": "– verification not required",
-        }.get(verification, f"– verification {verification}")
+        verified_text, verification_color = {
+            "verified": ("✓ 验证通过", "#2da44e"),
+            "failed": ("✗ 验证失败", "#cf222e"),
+            "unverified": ("! 等待验证", "#d29922"),
+            "not_required": ("– 无需验证", "#8b949e"),
+        }.get(verification, (f"– 验证状态：{verification}", "#8b949e"))
+        raw_stop_reason = str(snapshot.get("stop_reason", "unknown"))
+        stop_reason = STOP_REASON_LABELS.get(raw_stop_reason, raw_stop_reason)
+        card_background = "#f1f5f9" if self._theme == "light" else "#0c1119"
+        card_text = "#172033" if self._theme == "light" else "#f8fafc"
+        muted = "#64748b" if self._theme == "light" else "#8492a6"
         self.evidence_summary.setText(
-            f"✓ {snapshot.get('files_created', 0)} files created   "
-            f"✓ {snapshot.get('files_modified', 0)} files modified\n"
-            f"✓ {snapshot.get('directories_created', 0)} directories created   "
-            f"{verified_text}\n"
-            f"Steps {snapshot.get('steps', 0)}   "
-            f"Tool Calls {snapshot.get('tool_calls', 0)}   "
-            f"Duration {float(snapshot.get('duration', 0.0)):.1f}s\n"
-            f"Stop Reason: {snapshot.get('stop_reason', 'unknown')}"
+            f'<table width="100%" cellspacing="4" cellpadding="7">'
+            f'<tr><td bgcolor="{card_background}"><span style="color:{muted};">新建文件</span><br>'
+            f'<span style="color:{card_text}; font-size:17px; font-weight:700;">{snapshot.get("files_created", 0)}</span></td>'
+            f'<td bgcolor="{card_background}"><span style="color:{muted};">修改文件</span><br>'
+            f'<span style="color:{card_text}; font-size:17px; font-weight:700;">{snapshot.get("files_modified", 0)}</span></td>'
+            f'<td bgcolor="{card_background}"><span style="color:{muted};">新建目录</span><br>'
+            f'<span style="color:{card_text}; font-size:17px; font-weight:700;">{snapshot.get("directories_created", 0)}</span></td></tr>'
+            f'</table><p style="color:{verification_color}; font-weight:700;">{escape(verified_text)}</p>'
+            f'<p style="color:{muted};">步骤 {snapshot.get("steps", 0)}　·　'
+            f'工具调用 {snapshot.get("tool_calls", 0)}　·　'
+            f'耗时 {float(snapshot.get("duration", 0.0)):.1f} 秒</p>'
+            f'<p style="color:{card_text};">停止原因：{escape(stop_reason)}</p>'
         )
 
     def export_trace(self) -> None:
@@ -759,9 +995,9 @@ class MainWindow(QMainWindow):
             return
         selected, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Evidence Trace",
+            "导出任务证据轨迹",
             str(self.workspace / "agent-evidence.json"),
-            "JSON files (*.json)",
+            "JSON 文件 (*.json)",
         )
         if not selected:
             return
@@ -770,24 +1006,24 @@ class MainWindow(QMainWindow):
                 self._evidence_snapshot, Path(selected)
             )
         except (OSError, ValueError) as error:
-            QMessageBox.warning(self, "Export failed", str(error))
+            QMessageBox.warning(self, "导出失败", str(error))
             return
-        self._append_runtime(f"Evidence Trace 已导出：{path}")
+        self._append_runtime(f"证据轨迹已导出：{path}")
 
     def replay_trace(self) -> None:
         """加载并只读渲染历史 Trace，不调用 LLM、工具或 Workspace。"""
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            "Replay Evidence Trace",
+            "回放任务证据轨迹",
             str(self._evidence_store.root),
-            "JSON files (*.json)",
+            "JSON 文件 (*.json)",
         )
         if not selected:
             return
         try:
             snapshot = self._evidence_store.load(Path(selected))
         except (OSError, ValueError, json.JSONDecodeError) as error:
-            QMessageBox.warning(self, "Replay failed", str(error))
+            QMessageBox.warning(self, "回放失败", str(error))
             return
         self._evidence_snapshot = snapshot
         self._render_evidence_summary(snapshot)
@@ -801,19 +1037,19 @@ class MainWindow(QMainWindow):
             tool_name = str(record.get("tool", "tool"))
             success = record.get("success") is True
             error = record.get("error")
-            result_text = "✓ Completed" if success else f"✗ {error or 'Failed'}"
+            result_text = "✓ 已完成" if success else f"✗ {error or '失败'}"
             diff = str(record.get("diff", ""))
             summary = result_text + (f"\n{diff}" if diff else "")
             details = json.dumps(record, ensure_ascii=False, indent=2)
             self._add_activity(
-                f"REPLAY · {tool_name}",
-                f"Step {record.get('step', 0)} · {tool_name}",
+                f"回放 · {tool_name}",
+                f"步骤 {record.get('step', 0)} · {tool_name}",
                 summary,
                 details,
                 "success" if success else "error",
             )
         self.current_action_label.setText(
-            "Replay：正在查看历史证据，不会执行任何工具"
+            "回放：正在查看历史证据，不会执行任何工具"
         )
 
     def stop_task(self) -> None:
@@ -833,7 +1069,7 @@ class MainWindow(QMainWindow):
         self._pending_approval_request = None
         self.stop_button.setEnabled(False)
         self._set_agent_state("Stopping…")
-        self._append_runtime("Stop requested; waiting for the current operation.")
+        self._append_runtime("已请求停止，正在等待当前操作到达安全停止点。")
 
     def clear_conversation(self) -> None:
         if self._thread is not None:
@@ -845,12 +1081,12 @@ class MainWindow(QMainWindow):
             self._flush_session_saves()
             self._session_store.delete(self.workspace)
         except OSError as error:
-            self._append_runtime(f"Could not remove saved session: {error}", error=True)
+            self._append_runtime(f"无法删除已保存会话：{error}", error=True)
         self.activity_list.clear()
         self._trace_items.clear()
         self._trace_presentations.clear()
         self._verification_guidance_item = None
-        self._append_runtime("New conversation started.")
+        self._append_runtime("已开始新会话。")
         self._reset_status_metrics()
 
     def clear_all_saved_sessions(self) -> None:
@@ -860,7 +1096,7 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self,
             "清除全部已保存会话",
-            "将删除所有 Workspace 的已保存会话。当前内存中的对话不会被清空。继续吗？",
+            "将删除所有工作区的已保存会话。当前内存中的对话不会被清空。继续吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -870,7 +1106,7 @@ class MainWindow(QMainWindow):
             self._flush_session_saves()
             removed = self._session_store.clear_all()
         except OSError as error:
-            self._append_runtime(f"Could not clear saved sessions: {error}", error=True)
+            self._append_runtime(f"无法清除已保存会话：{error}", error=True)
             return
         self._append_runtime(f"已删除 {removed} 个保存的会话文件。")
 
@@ -883,13 +1119,13 @@ class MainWindow(QMainWindow):
         )
         item.setData(Qt.ItemDataRole.UserRole, presentation.details)
         item.setData(Qt.ItemDataRole.UserRole + 1, presentation.tone)
-        item.setForeground(self._tone_color(presentation.tone))
+        self._style_trace_item(item, presentation.tone)
         self.activity_list.addItem(item)
         self.activity_list.scrollToBottom()
         self._trace_items[tool_call.id] = item
         self._trace_presentations[tool_call.id] = presentation
         self.current_action_label.setText(f"当前正在做：{presentation.title}")
-        self.steps_status.setText(f"Steps: {step} / {self.max_steps_spin.value()}")
+        self.steps_status.setText(f"步骤：{step} / {self.max_steps_spin.value()}")
 
     def _on_tool_finished(
         self,
@@ -914,7 +1150,7 @@ class MainWindow(QMainWindow):
             item.setText(
                 f"步骤 {step}  ·  {action_title}  [{presentation.label}]\n"
                 f"{presentation.preview}\n"
-                f"✓ Applied — {presentation.summary}"
+                f"✓ 已应用 — {presentation.summary}"
             )
         else:
             item.setText(
@@ -932,9 +1168,9 @@ class MainWindow(QMainWindow):
             ).strip(),
         )
         item.setData(Qt.ItemDataRole.UserRole + 1, presentation.tone)
-        item.setForeground(self._tone_color(presentation.tone))
+        self._style_trace_item(item, presentation.tone)
         tool_count = sum(1 for value in self._trace_items.values() if value is not None)
-        self.tools_status.setText(f"Tool Calls: {tool_count}")
+        self.tools_status.setText(f"工具调用：{tool_count}")
         if verification != self._last_verification:
             self._add_verification_trace(verification)
         self._set_verification(verification)
@@ -945,10 +1181,10 @@ class MainWindow(QMainWindow):
 
     def _on_llm_retry(self, retry: int, maximum: int) -> None:
         self._add_activity(
-            "LLM RETRY",
+            "LLM 重试",
             "模型请求暂时失败，正在自动重试",
             f"正在进行第 {retry}/{maximum} 次重试；任务暂时不需要人工操作。",
-            "The request body and credentials are intentionally not displayed.",
+            "为保护安全，这里不会显示请求正文和凭据。",
             "warning",
         )
 
@@ -970,7 +1206,7 @@ class MainWindow(QMainWindow):
             )
             state = "Completed"
         elif result.stop_reason == "interrupted":
-            self._append_runtime("Agent task interrupted by user.")
+            self._append_runtime("任务已由用户中断。")
             state = "Ready"
         elif result.stop_reason == "verification_required":
             self._append_message(
@@ -980,8 +1216,7 @@ class MainWindow(QMainWindow):
                 markdown=True,
             )
             self._append_runtime(
-                "Agent execution ended, but the task is not complete: "
-                "the latest code still needs recognized verification.",
+                "智能体执行已经结束，但任务尚未完成：最新代码仍需要有效的验证证据。",
                 error=True,
             )
             state = "Needs Verification"
@@ -995,21 +1230,22 @@ class MainWindow(QMainWindow):
             )
         else:
             self._append_runtime(
-                f"Agent stopped: {result.stop_reason}\n{result.content}",
+                f"智能体已停止：{STOP_REASON_LABELS.get(result.stop_reason, result.stop_reason)}\n"
+                f"{result.content}",
                 error=True,
             )
             state = "Failed"
             title, summary = STOP_REASON_TEXT.get(
                 result.stop_reason,
-                ("Agent 已停止", result.content),
+                ("智能体已停止", result.content),
             )
             self._add_activity(
-                result.stop_reason.upper(), title, summary, result.content, "error"
+                "停止原因", title, summary, result.content, "error"
             )
         self.steps_status.setText(
-            f"Steps: {result.steps} / {self.max_steps_spin.value()}"
+            f"步骤：{result.steps} / {self.max_steps_spin.value()}"
         )
-        self.tools_status.setText(f"Tool Calls: {result.tool_calls}")
+        self.tools_status.setText(f"工具调用：{result.tool_calls}")
         self._set_verification(result.verification_status)
         self._set_agent_state(state)
         self.current_action_label.setText(
@@ -1031,9 +1267,9 @@ class MainWindow(QMainWindow):
             "verification_status": self._last_verification,
             "content": message,
         }
-        self._append_runtime(f"Agent worker failed: {message}", error=True)
+        self._append_runtime(f"智能体后台任务失败：{message}", error=True)
         self._add_activity(
-            "WORKER ERROR",
+            "后台错误",
             "后台执行线程发生异常",
             "界面已恢复，可以检查详情后重新运行任务。",
             message,
@@ -1061,11 +1297,11 @@ class MainWindow(QMainWindow):
         title, summary = {
             VERIFICATION_UNVERIFIED: (
                 "代码已修改，等待验证",
-                "文件写入成功不代表代码正确，Agent 接下来需要运行测试、构建或语法检查。",
+                "文件写入成功不代表代码正确，智能体接下来需要运行测试、构建或语法检查。",
             ),
             VERIFICATION_FAILED: (
                 "验证失败，继续修复",
-                "最新测试或检查没有通过，Agent 应根据错误结果继续定位问题。",
+                "最新测试或检查没有通过，智能体应根据错误结果继续定位问题。",
             ),
             VERIFICATION_VERIFIED: (
                 "验证通过",
@@ -1082,10 +1318,10 @@ class MainWindow(QMainWindow):
             VERIFICATION_UNVERIFIED: "warning",
         }.get(verification, "info")
         self._add_activity(
-            "VERIFICATION",
+            "验证",
             title,
             summary,
-            f"Runtime verification status: {verification}",
+            f"Runtime 验证状态：{VERIFICATION_TEXT.get(verification, verification)}",
             tone,
         )
 
@@ -1100,21 +1336,51 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem(f"{title}  [{label}]\n{summary}")
         item.setData(Qt.ItemDataRole.UserRole, details)
         item.setData(Qt.ItemDataRole.UserRole + 1, tone)
-        item.setForeground(self._tone_color(tone))
+        self._style_trace_item(item, tone)
         self.activity_list.addItem(item)
         self.activity_list.scrollToBottom()
         return item
 
     def show_trace_details(self, item: QListWidgetItem) -> None:
-        details = str(item.data(Qt.ItemDataRole.UserRole) or "No details available.")
+        details = str(item.data(Qt.ItemDataRole.UserRole) or "没有可显示的详情。")
         dialog = QDialog(self)
         dialog.setWindowTitle("执行详情")
-        dialog.resize(720, 480)
+        dialog.resize(860, 620)
         layout = QVBoxLayout(dialog)
-        viewer = QPlainTextEdit(details)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel(item.text().splitlines()[0] if item.text() else "执行详情")
+        title.setObjectName("traceDetailsTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        has_diff = any(
+            line.startswith(("+", "-", "@@")) for line in details.splitlines()
+        )
+        if has_diff:
+            legend = QLabel(
+                '<span style="color:#2da44e;">● 新增</span>&nbsp;&nbsp;&nbsp;'
+                '<span style="color:#cf222e;">● 删除</span>&nbsp;&nbsp;&nbsp;'
+                '<span style="color:#218bff;">● 修改位置</span>'
+            )
+            legend.setObjectName("traceDetailsLegend")
+            layout.addWidget(legend)
+
+        viewer = QTextBrowser()
+        viewer.setObjectName("traceDetailsViewer")
         viewer.setReadOnly(True)
-        viewer.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        layout.addWidget(viewer)
+        viewer.setOpenExternalLinks(False)
+        viewer.setLineWrapMode(QTextBrowser.LineWrapMode.NoWrap)
+        viewer.setHtml(trace_details_to_html(details, self._theme))
+        layout.addWidget(viewer, 1)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.accept)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
         dialog.exec()
 
     def _append_message(
@@ -1134,13 +1400,14 @@ class MainWindow(QMainWindow):
         )
         if role in {"USER TASK", "USER STEERING"}:
             role_text = (
-                "USER · 用户指令"
+                "用户 · 任务指令"
                 if role == "USER TASK"
-                else "USER · 运行中补充指令"
+                else "用户 · 运行中补充指令"
             )
             row = (
-                '<td width="18%"></td>'
-                f'<td class="userBubble"><div class="bubbleRole">{role_text}</div>{body}</td>'
+                '<td width="24%"></td>'
+                f'<td class="userBubble"><div class="bubbleRole">{role_text}</div>'
+                f'<div class="bubbleContent">{body}</div></td>'
             )
         elif role in {
             "AGENT FINAL RESPONSE",
@@ -1148,40 +1415,43 @@ class MainWindow(QMainWindow):
             "AGENT RESPONSE",
         }:
             role_text = {
-                "AGENT FINAL RESPONSE": "AGENT · 最终回答",
-                "AGENT UNVERIFIED DRAFT": "AGENT · 未验证草稿（不是完成结果）",
-                "AGENT RESPONSE": "AGENT · 历史回答（完成状态未知）",
+                "AGENT FINAL RESPONSE": "智能体 · 最终回答",
+                "AGENT UNVERIFIED DRAFT": "智能体 · 未验证草稿（不是完成结果）",
+                "AGENT RESPONSE": "智能体 · 历史回答（完成状态未知）",
             }[role]
             row = (
-                f'<td class="agentBubble"><div class="bubbleRole">{role_text}</div>{body}</td>'
-                '<td width="18%"></td>'
+                f'<td class="agentBubble"><div class="bubbleRole">{role_text}</div>'
+                f'<div class="bubbleContent">{body}</div></td>'
+                '<td width="20%"></td>'
             )
         else:
             role_text = escape(role)
             row = (
+                '<td width="7%"></td>'
                 f'<td class="runtimeBubble"><div class="bubbleRole">{role_text}</div>'
-                f'{body}</td>'
+                f'<div class="bubbleContent">{body}</div></td>'
+                '<td width="7%"></td>'
             )
         self.conversation_view.append(
-            '<table width="100%" cellspacing="0" cellpadding="9">'
-            f"<tr>{row}</tr></table><br>"
+            '<table width="100%" cellspacing="0" cellpadding="11">'
+            f"<tr>{row}</tr></table>"
         )
         self.conversation_view.verticalScrollBar().setValue(
             self.conversation_view.verticalScrollBar().maximum()
         )
 
     def _append_runtime(self, content: str, *, error: bool = False) -> None:
-        self._append_message("RUNTIME", content, "#f85149" if error else "#8b949e")
+        self._append_message("运行环境", content, "#f85149" if error else "#8b949e")
 
     def _set_running(self, running: bool) -> None:
         self.run_button.setEnabled(True)
-        self.run_button.setText("Send Update" if running else "Run Task")
+        self.run_button.setText("发送补充指令" if running else "运行任务")
         self.stop_button.setEnabled(running)
         self.task_input.setEnabled(True)
         self.task_input.setPlaceholderText(
             "输入补充指令，它会在下一个步骤生效。"
             if running
-            else "Fix the failing tests, repair the implementation and verify the result."
+            else "例如：运行项目测试，定位并修复失败的实现，然后验证结果。"
         )
         self.choose_workspace_button.setEnabled(not running)
         self.max_steps_spin.setEnabled(not running)
@@ -1195,17 +1465,26 @@ class MainWindow(QMainWindow):
         )
 
     def _set_agent_state(self, state: str) -> None:
-        self.agent_status.setText(f"Agent: {state}")
+        self.agent_status.setText(f"智能体：{AGENT_STATE_TEXT.get(state, state)}")
+        self.agent_status.setProperty("state", state)
+        self.agent_status.style().unpolish(self.agent_status)
+        self.agent_status.style().polish(self.agent_status)
+        self.current_action_dot.setProperty("state", state)
+        self.current_action_dot.style().unpolish(self.current_action_dot)
+        self.current_action_dot.style().polish(self.current_action_dot)
 
     def _set_verification(self, status: str) -> None:
         text = VERIFICATION_TEXT.get(status, status)
-        self.verification_status.setText(f"Verification: {text}")
+        self.verification_status.setText(f"验证：{text}")
+        self.verification_status.setProperty("verification", status)
+        self.verification_status.style().unpolish(self.verification_status)
+        self.verification_status.style().polish(self.verification_status)
 
     def _reset_status_metrics(self) -> None:
         self._set_agent_state("Ready")
-        self.steps_status.setText(f"Steps: 0 / {self.max_steps_spin.value()}")
-        self.tools_status.setText("Tool Calls: 0")
-        self.elapsed_status.setText("Elapsed: 0.0s")
+        self.steps_status.setText(f"步骤：0 / {self.max_steps_spin.value()}")
+        self.tools_status.setText("工具调用：0")
+        self.elapsed_status.setText("耗时：0.0 秒")
         self._set_verification(VERIFICATION_NOT_REQUIRED)
         self.current_action_label.setText("当前状态：等待任务")
 
@@ -1213,7 +1492,7 @@ class MainWindow(QMainWindow):
         if self._started_at is None:
             return
         elapsed = time.monotonic() - self._started_at
-        self.elapsed_status.setText(f"Elapsed: {elapsed:.1f}s")
+        self.elapsed_status.setText(f"耗时：{elapsed:.1f} 秒")
 
     def _model_name(self) -> str:
         if self._settings is not None:
@@ -1221,7 +1500,7 @@ class MainWindow(QMainWindow):
         try:
             return Settings.from_env().model
         except ConfigurationError:
-            return "Not configured"
+            return "未配置"
 
     def _save_session(self) -> None:
         """把不可变消息快照提交给单线程后台写入器。"""
@@ -1256,7 +1535,7 @@ class MainWindow(QMainWindow):
             self.session_save_failed.emit(f"{type(error).__name__}: {error}")
 
     def _on_session_save_failed(self, message: str) -> None:
-        self._append_runtime(f"Session save failed: {message}", error=True)
+        self._append_runtime(f"会话保存失败：{message}", error=True)
 
     def _flush_session_saves(self) -> None:
         """等待之前提交的保存任务完成，确保后续删除不会被旧任务覆盖。"""
@@ -1273,19 +1552,19 @@ class MainWindow(QMainWindow):
             self._conversation = Conversation(SYSTEM_PROMPT)
             self._last_run_state = None
             self._reset_status_metrics()
-            self._append_runtime(f"Saved session could not be restored: {error}", error=True)
+            self._append_runtime(f"无法恢复已保存会话：{error}", error=True)
             return
         if snapshot is None:
             self._conversation = Conversation(SYSTEM_PROMPT)
             self._last_run_state = None
             self._reset_status_metrics()
             self.conversation_view.clear()
-            self._append_runtime("Ready. Describe a coding task for this Workspace.")
+            self._append_runtime("已就绪。请描述要在当前工作区完成的编码任务。")
             return
         self._conversation = snapshot.to_conversation()
         self._last_run_state = snapshot.last_run
         self.conversation_view.clear()
-        restored_message = "已恢复这个 Workspace 最近保存的会话。"
+        restored_message = "已恢复这个工作区最近保存的会话。"
         if snapshot.compacted:
             restored_message += " 较早的工具结果已按存储上限安全压缩。"
         self._append_runtime(restored_message)
@@ -1336,7 +1615,8 @@ class MainWindow(QMainWindow):
                     markdown=True,
                 )
             self._append_runtime(
-                f"上次执行已结束，但任务没有完成：{last_stop_reason}。",
+                "上次执行已结束，但任务没有完成："
+                f"{STOP_REASON_LABELS.get(last_stop_reason, last_stop_reason)}。",
                 error=True,
             )
         if snapshot.last_run is not None:
@@ -1353,9 +1633,9 @@ class MainWindow(QMainWindow):
                 "verification_required": "Needs Verification",
             }.get(last_stop_reason, "Failed")
             self.steps_status.setText(
-                f"Steps: {steps} / {self.max_steps_spin.value()}"
+                f"步骤：{steps} / {self.max_steps_spin.value()}"
             )
-            self.tools_status.setText(f"Tool Calls: {tool_calls}")
+            self.tools_status.setText(f"工具调用：{tool_calls}")
             self._set_verification(verification)
             self._set_agent_state(restored_state)
         else:
@@ -1380,87 +1660,163 @@ class MainWindow(QMainWindow):
         for index in range(self.activity_list.count()):
             item = self.activity_list.item(index)
             tone = str(item.data(Qt.ItemDataRole.UserRole + 1) or "normal")
-            item.setForeground(self._tone_color(tone))
+            self._style_trace_item(item, tone)
+        if self._evidence_snapshot is not None:
+            self._render_evidence_summary(self._evidence_snapshot)
 
     def _tone_color(self, tone: str) -> QColor:
         colors = LIGHT_TONE_COLORS if self._theme == "light" else TONE_COLORS
         return colors.get(tone, colors["normal"])
 
+    def _tone_background(self, tone: str) -> QColor:
+        colors = (
+            LIGHT_TONE_BACKGROUNDS
+            if self._theme == "light"
+            else TONE_BACKGROUNDS
+        )
+        return colors.get(tone, colors["normal"])
+
+    def _style_trace_item(self, item: QListWidgetItem, tone: str) -> None:
+        """统一时间线卡片的文字与背景颜色。"""
+        item.setForeground(self._tone_color(tone))
+        item.setBackground(self._tone_background(tone))
+
     def _apply_style(self) -> None:
         palette = (
             {
-                "background": "#f6f8fa",
+                "background": "#eef2f7",
                 "surface": "#ffffff",
+                "surface_alt": "#f8fafc",
                 "input": "#ffffff",
-                "border": "#d0d7de",
-                "text": "#24292f",
-                "bright": "#1f2328",
-                "muted": "#57606a",
-                "disabled": "#8c959f",
-                "button": "#f6f8fa",
-                "hover": "#eaeef2",
-                "selected": "#ddf4ff",
-                "accent": "#0969da",
-                "scroll": "#afb8c1",
+                "border": "#d7dee8",
+                "strong_border": "#bcc7d6",
+                "text": "#334155",
+                "bright": "#172033",
+                "muted": "#64748b",
+                "disabled": "#9aa6b5",
+                "button": "#f8fafc",
+                "hover": "#edf2f7",
+                "selected": "#e8f0ff",
+                "accent": "#2563eb",
+                "accent_soft": "#e8f0ff",
+                "project": "#0284c7",
+                "conversation": "#7c3aed",
+                "activity": "#d97706",
+                "success": "#16813a",
+                "scroll": "#b8c2cf",
             }
             if self._theme == "light"
             else {
-                "background": "#0d1117",
-                "surface": "#161b22",
-                "input": "#0d1117",
-                "border": "#30363d",
-                "text": "#c9d1d9",
-                "bright": "#f0f6fc",
-                "muted": "#8b949e",
-                "disabled": "#484f58",
-                "button": "#21262d",
-                "hover": "#30363d",
-                "selected": "#1f2937",
-                "accent": "#58a6ff",
-                "scroll": "#30363d",
+                "background": "#080c12",
+                "surface": "#10161f",
+                "surface_alt": "#151c26",
+                "input": "#0c1119",
+                "border": "#253041",
+                "strong_border": "#35445a",
+                "text": "#cbd5e1",
+                "bright": "#f8fafc",
+                "muted": "#8492a6",
+                "disabled": "#526173",
+                "button": "#18212d",
+                "hover": "#213043",
+                "selected": "#1c3150",
+                "accent": "#60a5fa",
+                "accent_soft": "#152844",
+                "project": "#38bdf8",
+                "conversation": "#a78bfa",
+                "activity": "#f59e0b",
+                "success": "#3fb950",
+                "scroll": "#344156",
             }
         )
         self.setStyleSheet(
             f"""
-            QMainWindow, QWidget {{
-                background: {palette['background']}; color: {palette['text']}; font-size: 13px;
+            QMainWindow {{ background: {palette['background']}; }}
+            QWidget {{
+                color: {palette['text']}; font-size: 13px;
                 font-family: "Microsoft YaHei UI", "Segoe UI", Arial, sans-serif;
             }}
-            QFrame#topBar, QFrame#panel {{ background: {palette['surface']}; border: 1px solid {palette['border']}; border-radius: 7px; }}
-            QFrame#evidenceCard {{ background: {palette['input']}; border: 1px solid {palette['border']}; border-radius: 6px; }}
-            QFrame#approvalCard {{ background: {palette['selected']}; border: 1px solid {palette['accent']}; border-radius: 6px; }}
-            QLabel#appTitle {{ color: {palette['bright']}; font-size: 18px; font-weight: 700; }}
-            QLabel#panelTitle {{ color: {palette['muted']}; font-size: 11px; font-weight: 700; }}
-            QLabel#evidenceTitle {{ color: {palette['accent']}; font-size: 11px; font-weight: 700; }}
-            QLabel#workspaceLabel, QLabel#modelLabel {{ color: {palette['accent']}; }}
+            QFrame#topBar {{ background: {palette['surface']}; border: 1px solid {palette['border']}; border-radius: 10px; }}
+            QFrame#panel {{ background: {palette['surface']}; border: 1px solid {palette['border']}; border-radius: 10px; }}
+            QFrame#topDivider {{ color: {palette['border']}; background: {palette['border']}; border: 0; max-height: 1px; }}
+            QFrame#panelAccent {{ border: 0; border-radius: 2px; }}
+            QFrame#panelAccent[section="project"] {{ background: {palette['project']}; }}
+            QFrame#panelAccent[section="conversation"] {{ background: {palette['conversation']}; }}
+            QFrame#panelAccent[section="activity"] {{ background: {palette['activity']}; }}
+            QFrame#taskComposer {{ background: {palette['surface_alt']}; border: 1px solid {palette['border']}; border-radius: 8px; }}
+            QFrame#currentActionCard {{ background: {palette['accent_soft']}; border: 1px solid {palette['accent']}; border-radius: 8px; }}
+            QFrame#evidenceCard {{ background: {palette['surface_alt']}; border: 1px solid {palette['border']}; border-radius: 8px; }}
+            QFrame#approvalCard {{ background: {palette['selected']}; border: 1px solid {palette['accent']}; border-radius: 8px; }}
+            QLabel#appMark {{ background: {palette['accent']}; color: white; border-radius: 9px; font-size: 13px; font-weight: 800; }}
+            QLabel#appTitle {{ color: {palette['bright']}; font-size: 19px; font-weight: 750; }}
+            QLabel#appSubtitle {{ color: {palette['muted']}; font-size: 11px; }}
+            QLabel#fieldCaption {{ color: {palette['muted']}; font-size: 10px; font-weight: 650; }}
+            QLabel#panelTitle {{ color: {palette['bright']}; font-size: 13px; font-weight: 700; }}
+            QLabel#panelTitle[section="project"] {{ color: {palette['project']}; }}
+            QLabel#panelTitle[section="conversation"] {{ color: {palette['conversation']}; }}
+            QLabel#panelTitle[section="activity"] {{ color: {palette['activity']}; }}
+            QLabel#composerTitle, QLabel#timelineTitle {{ color: {palette['bright']}; font-size: 12px; font-weight: 700; }}
+            QLabel#currentActionDot {{ color: {palette['accent']}; font-size: 14px; }}
+            QLabel#currentActionDot[state="Completed"] {{ color: {palette['success']}; }}
+            QLabel#currentActionDot[state="Failed"] {{ color: #f85149; }}
+            QLabel#currentActionDot[state="Needs Verification"] {{ color: {palette['activity']}; }}
+            QLabel#currentActionDot[state="Stopping…"] {{ color: {palette['activity']}; }}
+            QLabel#currentAction {{ color: {palette['bright']}; font-weight: 600; }}
+            QLabel#evidenceTitle {{ color: {palette['accent']}; font-size: 12px; font-weight: 750; }}
+            QLabel#evidenceBadge {{ color: {palette['accent']}; background: {palette['accent_soft']}; border: 1px solid {palette['accent']}; border-radius: 8px; padding: 2px 7px; font-size: 10px; }}
+            QLabel#traceDetailsTitle {{ color: {palette['bright']}; font-size: 16px; font-weight: 700; padding: 2px 0 4px 0; }}
+            QLabel#traceDetailsLegend {{ color: {palette['muted']}; font-size: 12px; padding-bottom: 4px; }}
+            QLabel#workspaceLabel {{ color: {palette['bright']}; font-weight: 600; }}
+            QLabel#modelLabel {{ color: {palette['accent']}; background: {palette['accent_soft']}; border-radius: 7px; padding: 3px 8px; font-weight: 650; }}
             QLabel#mutedText {{ color: {palette['muted']}; font-size: 11px; }}
-            QPushButton, QToolButton {{ background: {palette['button']}; border: 1px solid {palette['border']}; border-radius: 5px; padding: 6px 11px; }}
-            QPushButton:hover, QToolButton:hover {{ background: {palette['hover']}; border-color: {palette['muted']}; }}
+            QPushButton, QToolButton {{ background: {palette['button']}; border: 1px solid {palette['border']}; border-radius: 6px; padding: 7px 12px; font-weight: 600; }}
+            QPushButton:hover, QToolButton:hover {{ background: {palette['hover']}; border-color: {palette['strong_border']}; }}
+            QPushButton:pressed, QToolButton:pressed {{ background: {palette['selected']}; }}
             QPushButton:disabled {{ color: {palette['disabled']}; background: {palette['surface']}; }}
-            QPushButton[accent="true"] {{ background: #238636; border-color: #2ea043; color: white; font-weight: 600; }}
-            QPushButton[accent="true"]:hover {{ background: #2ea043; }}
+            QPushButton[accent="true"] {{ background: #16813a; border-color: #24934b; color: white; font-weight: 700; }}
+            QPushButton[accent="true"]:hover {{ background: #24934b; border-color: #35a85c; }}
             QTextBrowser, QPlainTextEdit, QTreeView, QListWidget, QSpinBox, QComboBox {{
-                background: {palette['input']}; border: 1px solid {palette['border']}; border-radius: 5px; color: {palette['text']};
+                background: {palette['input']}; border: 1px solid {palette['border']}; border-radius: 7px; color: {palette['text']};
                 selection-background-color: {palette['accent']};
             }}
-            QComboBox {{ min-height: 26px; padding: 0 7px; }}
-            QSpinBox {{ min-height: 26px; padding-left: 6px; padding-right: 22px; }}
+            QTextBrowser:focus, QPlainTextEdit:focus, QTreeView:focus, QListWidget:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {palette['accent']}; }}
+            QComboBox {{ min-height: 28px; padding: 0 8px; }}
+            QComboBox::drop-down {{ border: 0; width: 24px; }}
+            QComboBox QAbstractItemView {{ background: {palette['surface']}; border: 1px solid {palette['strong_border']}; selection-background-color: {palette['selected']}; padding: 4px; }}
+            QSpinBox {{ min-height: 28px; padding-left: 7px; padding-right: 24px; }}
             QSpinBox::up-button, QSpinBox::down-button {{
-                subcontrol-origin: border; width: 20px; background: {palette['button']};
+                subcontrol-origin: border; width: 22px; background: {palette['button']};
                 border-left: 1px solid {palette['border']};
             }}
             QSpinBox::up-button {{ subcontrol-position: top right; border-bottom: 1px solid {palette['border']}; }}
             QSpinBox::down-button {{ subcontrol-position: bottom right; }}
-            QPlainTextEdit {{ padding: 8px; font-family: Consolas, 'Cascadia Code', monospace; }}
-            QListWidget {{ padding: 5px; }}
-            QListWidget::item {{ background: {palette['surface']}; border: 1px solid {palette['border']}; border-radius: 5px; padding: 8px; }}
+            QPlainTextEdit {{ padding: 9px; font-family: Consolas, 'Cascadia Code', monospace; }}
+            QPlainTextEdit#taskInput {{ background: {palette['input']}; border-color: {palette['strong_border']}; }}
+            QTextBrowser#conversationView {{ border: 0; background: {palette['input']}; padding: 8px; }}
+            QTextBrowser#traceDetailsViewer {{ padding: 0; border-radius: 7px; }}
+            QListWidget#activityList {{ padding: 5px; background: {palette['input']}; }}
+            QListWidget::item {{ border: 1px solid {palette['border']}; border-radius: 7px; padding: 10px; margin: 2px 1px; }}
+            QListWidget::item:hover {{ border-color: {palette['strong_border']}; }}
             QListWidget::item:selected {{ background: {palette['selected']}; border-color: {palette['accent']}; }}
-            QTreeView::item {{ padding: 3px; }}
-            QStatusBar {{ background: {palette['surface']}; border-top: 1px solid {palette['border']}; }}
-            QStatusBar QLabel {{ padding: 0 9px; color: {palette['muted']}; }}
-            QSplitter::handle {{ background: {palette['background']}; width: 8px; }}
+            QTreeView#projectTree {{ border: 0; background: {palette['input']}; padding: 4px; }}
+            QTreeView::item {{ padding: 5px 3px; border-radius: 4px; }}
+            QTreeView::item:hover {{ background: {palette['hover']}; }}
+            QTreeView::item:selected {{ background: {palette['selected']}; color: {palette['bright']}; }}
+            QCheckBox {{ spacing: 6px; color: {palette['muted']}; }}
+            QCheckBox::indicator {{ width: 15px; height: 15px; }}
+            QStatusBar {{ background: {palette['surface']}; border-top: 1px solid {palette['border']}; min-height: 30px; }}
+            QStatusBar QLabel {{ margin: 4px 3px; padding: 3px 9px; color: {palette['muted']}; background: {palette['surface_alt']}; border-radius: 6px; }}
+            QLabel#agentStatus[state="Running"] {{ color: {palette['accent']}; }}
+            QLabel#agentStatus[state="Completed"] {{ color: {palette['success']}; }}
+            QLabel#agentStatus[state="Failed"], QLabel#verificationStatus[verification="failed"] {{ color: #f85149; }}
+            QLabel#agentStatus[state="Needs Verification"], QLabel#verificationStatus[verification="unverified"] {{ color: {palette['activity']}; }}
+            QLabel#verificationStatus[verification="verified"] {{ color: {palette['success']}; }}
+            QSplitter::handle {{ background: {palette['background']}; width: 7px; }}
+            QSplitter::handle:hover {{ background: {palette['accent_soft']}; }}
             QScrollBar:vertical {{ background: {palette['background']}; width: 10px; }}
             QScrollBar::handle:vertical {{ background: {palette['scroll']}; border-radius: 4px; min-height: 30px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QToolTip {{ color: {palette['text']}; background: {palette['surface_alt']}; border: 1px solid {palette['strong_border']}; padding: 5px; }}
             """
         )
         self.theme_button.setText("☀" if self._theme == "dark" else "☾")
@@ -1472,33 +1828,41 @@ class MainWindow(QMainWindow):
     def _apply_conversation_style(self) -> None:
         if self._theme == "light":
             colors = {
-                "user_bg": "#0969da",
+                "user_bg": "#2563eb",
                 "user_text": "#ffffff",
-                "agent_bg": "#dafbe1",
-                "agent_text": "#1f2328",
-                "runtime_bg": "#f6f8fa",
-                "runtime_text": "#57606a",
-                "code_bg": "#afb8c133",
+                "user_border": "#1d4ed8",
+                "agent_bg": "#f1f5f9",
+                "agent_text": "#1e293b",
+                "agent_border": "#cbd5e1",
+                "runtime_bg": "#f8fafc",
+                "runtime_text": "#64748b",
+                "runtime_border": "#e2e8f0",
+                "code_bg": "#e2e8f0",
             }
         else:
             colors = {
-                "user_bg": "#1f6feb",
+                "user_bg": "#1d4ed8",
                 "user_text": "#ffffff",
-                "agent_bg": "#1b4721",
-                "agent_text": "#e6edf3",
-                "runtime_bg": "#21262d",
-                "runtime_text": "#c9d1d9",
-                "code_bg": "#0d1117",
+                "user_border": "#3b82f6",
+                "agent_bg": "#172033",
+                "agent_text": "#e2e8f0",
+                "agent_border": "#334155",
+                "runtime_bg": "#111827",
+                "runtime_text": "#94a3b8",
+                "runtime_border": "#253041",
+                "code_bg": "#0b111b",
             }
         self.conversation_view.document().setDefaultStyleSheet(
             f"""
-            td.userBubble {{ background-color: {colors['user_bg']}; color: {colors['user_text']}; }}
-            td.agentBubble {{ background-color: {colors['agent_bg']}; color: {colors['agent_text']}; }}
-            td.runtimeBubble {{ background-color: {colors['runtime_bg']}; color: {colors['runtime_text']}; }}
-            .bubbleRole {{ font-weight: 700; margin-bottom: 7px; }}
-            pre {{ background-color: {colors['code_bg']}; padding: 8px; white-space: pre-wrap; }}
+            td.userBubble {{ background-color: {colors['user_bg']}; color: {colors['user_text']}; border: 1px solid {colors['user_border']}; }}
+            td.agentBubble {{ background-color: {colors['agent_bg']}; color: {colors['agent_text']}; border: 1px solid {colors['agent_border']}; }}
+            td.runtimeBubble {{ background-color: {colors['runtime_bg']}; color: {colors['runtime_text']}; border: 1px solid {colors['runtime_border']}; }}
+            .bubbleRole {{ font-weight: 700; margin-bottom: 8px; font-size: 12px; }}
+            .bubbleContent {{ line-height: 1.45; }}
+            pre {{ background-color: {colors['code_bg']}; padding: 9px; white-space: pre-wrap; }}
             code {{ font-family: Consolas, 'Cascadia Code', monospace; }}
             h1, h2, h3 {{ margin-top: 8px; margin-bottom: 5px; }}
+            p {{ margin-top: 4px; margin-bottom: 6px; }}
             """
         )
 
@@ -1523,15 +1887,15 @@ def read_preview_text(workspace: Path, path: Path) -> str:
     try:
         target.relative_to(root)
     except ValueError:
-        raise ValueError("The preview target is outside the workspace.") from None
+        raise ValueError("预览目标位于当前工作区之外。") from None
     name = target.name.casefold()
     if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
-        raise ValueError("Environment secret files are not previewed.")
+        raise ValueError("为保护敏感信息，不允许预览环境变量文件。")
     if target.suffix.casefold() not in PREVIEW_SUFFIXES:
-        raise ValueError("This file type is not supported by the text preview.")
+        raise ValueError("文本预览暂不支持这种文件类型。")
     if target.stat().st_size > PREVIEW_MAX_BYTES:
-        raise ValueError("The file is too large to preview.")
+        raise ValueError("文件过大，无法预览。")
     data = target.read_bytes()
     if b"\x00" in data:
-        raise ValueError("Binary files cannot be previewed.")
+        raise ValueError("二进制文件无法预览。")
     return data.decode("utf-8")

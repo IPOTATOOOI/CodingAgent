@@ -133,7 +133,7 @@ class AgentWorker(QObject):
         if action == ApprovalAction.DENY:
             return ApprovalDecision.reject(
                 "ReadOnlyMode",
-                "Safety Mode is Read Only; this tool was blocked before execution.",
+                "当前处于只读安全模式，工具已在执行前被阻止。",
             )
 
         with self._approval_lock:
@@ -168,7 +168,7 @@ class AgentWorker(QObject):
         safe: dict[str, Any] = {}
         for name, value in arguments.items():
             if name in {"content", "old_text", "new_text"}:
-                safe[name] = f"<{len(value) if isinstance(value, str) else 0} chars>"
+                safe[name] = f"<{len(value) if isinstance(value, str) else 0} 个字符>"
             else:
                 safe[name] = value
         return safe
@@ -181,8 +181,8 @@ class AgentWorker(QObject):
             lines = difflib.unified_diff(
                 str(arguments.get("old_text", "")).splitlines(),
                 str(arguments.get("new_text", "")).splitlines(),
-                fromfile=f"{path} (before)",
-                tofile=f"{path} (after)",
+                fromfile=f"{path}（修改前）",
+                tofile=f"{path}（修改后）",
                 lineterm="",
             )
             return "\n".join(list(lines)[:12])[:1_200]

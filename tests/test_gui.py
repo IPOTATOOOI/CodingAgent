@@ -15,6 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
     QMessageBox,
     QStyle,
     QStyleOptionSpinBox,
@@ -29,6 +30,7 @@ from coding_agent.gui.main_window import (
     MainWindow,
     markdown_to_html_fragment,
     read_preview_text,
+    trace_details_to_html,
 )
 from coding_agent.gui.trace import format_tool_call, format_tool_result
 from coding_agent.llm import LLMResponse, ToolCall
@@ -124,8 +126,14 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.model_label.text(), "test-model")
         self.assertEqual(DEFAULT_MAX_STEPS, 20)
         self.assertEqual(window.max_steps_spin.value(), 20)
-        self.assertEqual(window.safety_mode_combo.currentText(), "Ask")
+        self.assertEqual(window.safety_mode_combo.currentText(), "询问")
         self.assertTrue(window.replay_trace_button.isEnabled())
+        self.assertIsNotNone(window.findChild(QFrame, "taskComposer"))
+        self.assertIsNotNone(window.findChild(QFrame, "currentActionCard"))
+        self.assertEqual(
+            window.activity_list.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
 
     def test_max_steps_can_be_increased_and_decreased(self) -> None:
         window = self._window()
@@ -177,7 +185,7 @@ class GuiTests(unittest.TestCase):
         window.toggle_theme()
         self.assertEqual(window._theme, "light")
         self.assertEqual(window.theme_button.text(), "☾")
-        self.assertIn("#f6f8fa", window.styleSheet())
+        self.assertIn("#eef2f7", window.styleSheet())
         window.toggle_theme()
         self.assertEqual(window._theme, "dark")
 
@@ -195,13 +203,28 @@ class GuiTests(unittest.TestCase):
         html = window.conversation_view.toHtml()
         fragment = markdown_to_html_fragment("**Passed**")
 
-        self.assertIn("USER · 用户指令", window.conversation_view.toPlainText())
-        self.assertIn("AGENT · 最终回答", window.conversation_view.toPlainText())
+        self.assertIn("用户 · 任务指令", window.conversation_view.toPlainText())
+        self.assertIn("智能体 · 最终回答", window.conversation_view.toPlainText())
         self.assertIn("<table", html)
         self.assertIn("font-weight:700", html)
         self.assertNotIn("**Passed**", html)
         self.assertNotIn("<html", fragment)
         self.assertIn("font-weight:700", fragment)
+
+    def test_trace_details_html_highlights_diff_and_escapes_code(self) -> None:
+        html = trace_details_to_html(
+            "修改内容\n@@ 第 8 行 @@\n-old <tag>\n+new & value",
+            "light",
+        )
+
+        self.assertIn('class="section"', html)
+        self.assertIn('class="hunk"', html)
+        self.assertIn('class="deletion"', html)
+        self.assertIn('class="addition"', html)
+        self.assertIn("#dafbe1", html)
+        self.assertIn("-old &lt;tag&gt;", html)
+        self.assertIn("+new &amp; value", html)
+        self.assertNotIn("-old <tag>", html)
 
     def test_workspace_loads_and_text_preview_is_bounded(self) -> None:
         window = self._window()
@@ -246,10 +269,10 @@ class GuiTests(unittest.TestCase):
         )
 
         displayed = window.conversation_view.toPlainText()
-        self.assertEqual(window.agent_status.text(), "Agent: Needs Verification")
+        self.assertEqual(window.agent_status.text(), "智能体：等待验证")
         self.assertIn("未验证草稿", displayed)
         self.assertIn("不是完成结果", displayed)
-        self.assertNotIn("AGENT · 最终回答", displayed)
+        self.assertNotIn("智能体 · 最终回答", displayed)
 
     def test_unverified_session_restores_run_state_and_draft(self) -> None:
         from coding_agent.conversation import Conversation
@@ -275,11 +298,11 @@ class GuiTests(unittest.TestCase):
         self.assertIn("未验证草稿", displayed)
         self.assertIn("Unverified generated result", displayed)
         self.assertIn("任务没有完成", displayed)
-        self.assertNotIn("AGENT · 最终回答", displayed)
-        self.assertEqual(window.agent_status.text(), "Agent: Needs Verification")
-        self.assertEqual(window.steps_status.text(), "Steps: 13 / 20")
-        self.assertEqual(window.tools_status.text(), "Tool Calls: 10")
-        self.assertEqual(window.verification_status.text(), "Verification: 等待验证")
+        self.assertNotIn("智能体 · 最终回答", displayed)
+        self.assertEqual(window.agent_status.text(), "智能体：等待验证")
+        self.assertEqual(window.steps_status.text(), "步骤：13 / 20")
+        self.assertEqual(window.tools_status.text(), "工具调用：10")
+        self.assertEqual(window.verification_status.text(), "验证：等待验证")
 
     def test_auto_save_can_be_disabled(self) -> None:
         window = self._window()
@@ -351,14 +374,14 @@ class GuiTests(unittest.TestCase):
 
         self.assertLess(returned_after, 0.1)
         self.assertTrue(window.run_button.isEnabled())
-        self.assertEqual(window.run_button.text(), "Send Update")
+        self.assertEqual(window.run_button.text(), "发送补充指令")
         self.assertTrue(window.task_input.isEnabled())
         self._wait_for_worker(window)
         self.assertTrue(window.run_button.isEnabled())
-        self.assertEqual(window.agent_status.text(), "Agent: Completed")
+        self.assertEqual(window.agent_status.text(), "智能体：已完成")
         self.assertIn("Task completed from worker.", window.conversation_view.toPlainText())
         self.assertTrue(window.export_trace_button.isEnabled())
-        self.assertIn("Stop Reason: completed", window.evidence_summary.text())
+        self.assertIn("停止原因：正常完成", window.evidence_summary.text())
         self.assertEqual(len(list(self.evidence_store.root.glob("*.json"))), 1)
 
     def test_ask_mode_waits_before_write_and_accepts_approval(self) -> None:
@@ -376,7 +399,7 @@ class GuiTests(unittest.TestCase):
 
         self.assertTrue(window.approval_frame.isVisible())
         self.assertFalse((self.workspace / "approved.txt").exists())
-        self.assertIn("Requested change", window.approval_label.text())
+        self.assertIn("请求修改内容", window.approval_label.text())
         self.assertIn("+created", window.approval_label.text())
         window.approve_button.click()
         self._wait_for_worker(window)
@@ -452,7 +475,7 @@ class GuiTests(unittest.TestCase):
             window.replay_trace()
 
         self.assertTrue(export_path.exists())
-        self.assertIn("REPLAY", window.activity_list.item(0).text())
+        self.assertIn("回放", window.activity_list.item(0).text())
         self.assertIn("-value = 1", window.activity_list.item(0).text())
         self.assertIn("不会执行任何工具", window.current_action_label.text())
         self.assertEqual(
@@ -487,7 +510,7 @@ class GuiTests(unittest.TestCase):
         self.assertIn("运行项目测试", window.activity_list.item(0).text())
         self.assertIn("项目测试通过", window.activity_list.item(0).text())
         self.assertIn("验证通过", window.activity_list.item(1).text())
-        self.assertEqual(window.verification_status.text(), "Verification: 验证通过")
+        self.assertEqual(window.verification_status.text(), "验证：验证通过")
         self.assertIn("项目测试通过", window.current_action_label.text())
 
     def test_progress_warning_event_is_explained_in_activity_panel(self) -> None:
@@ -564,7 +587,7 @@ class GuiTests(unittest.TestCase):
         self._wait_for_worker(window)
 
         self.assertTrue(window.run_button.isEnabled())
-        self.assertEqual(window.agent_status.text(), "Agent: Failed")
+        self.assertEqual(window.agent_status.text(), "智能体：失败")
         self.assertIn("worker boom", window.conversation_view.toPlainText())
 
     def test_stop_requests_cooperative_cancellation(self) -> None:
@@ -576,8 +599,8 @@ class GuiTests(unittest.TestCase):
         self._wait_for_worker(window)
 
         self.assertTrue(window.run_button.isEnabled())
-        self.assertEqual(window.agent_status.text(), "Agent: Ready")
-        self.assertIn("interrupted", window.conversation_view.toPlainText().lower())
+        self.assertEqual(window.agent_status.text(), "智能体：就绪")
+        self.assertIn("用户中断", window.conversation_view.toPlainText())
 
     def test_running_task_accepts_a_steering_update(self) -> None:
         window = self._window()
@@ -713,7 +736,7 @@ class GuiTests(unittest.TestCase):
         self.assertIn("-return a - b", presentation.preview)
         self.assertIn("+return a + b", presentation.preview)
         self.assertIn("@@ 第 8 行 → 第 8 行 @@", item_text)
-        self.assertIn("✓ Applied", item_text)
+        self.assertIn("✓ 已应用", item_text)
         self.assertIn("-return a - b", item_text)
         self.assertIn("+return a + b", item_text)
         self.assertIn("修改内容", presentation.details)

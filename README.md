@@ -108,29 +108,32 @@ coding-agent-gui --workspace . --max-steps 20
 
 GUI 采用适合演示 Autonomous Loop 的三栏结构：
 
-- 左侧 `Project` 使用 Qt 文件系统模型浏览当前 Workspace；双击受支持的 UTF-8
+- 顶部使用双层工作台工具栏：第一层突出应用、当前工作区和主题切换，第二层集中模型、
+  最大步骤、安全模式及会话操作，避免窗口较窄时所有控件挤在一行。
+- 左侧“项目文件”使用 Qt 文件系统模型浏览当前工作区；双击受支持的 UTF-8
   文本文件可进行只读、有大小限制的预览。
-- 中间 `Conversation` 使用右侧用户气泡、左侧 Agent 气泡和中性 Runtime 提示块，
-  Agent Final Response 支持常见 Markdown 标题、列表、粗体和代码格式，并提供多行
-  任务输入、Run、Stop 和 Clear 操作。
-- 右侧 `Agent Activity / Execution Trace` 以面向用户的时间线解释每一步在做什么、
+- 中间“对话”使用右侧用户气泡、左侧智能体气泡和中性 Runtime 提示块，
+  最终回答支持常见 Markdown 标题、列表、粗体和代码格式，并提供多行
+  任务输入、“运行任务”“停止”和“清空对话”操作；输入区使用独立任务卡与聊天记录分隔。
+- 右侧“智能体活动 / 执行轨迹”以面向用户的时间线解释每一步在做什么、
   执行结果意味着什么，以及 Agent 为什么继续或停止。例如“运行项目测试 → 测试失败，
-  继续定位和修复”。Read、Search、List、Create、Edit、Run 等底层工具标签仍会保留；
+  继续定位和修复”。“读取、搜索、浏览、新建文件、修改、运行”等工具标签会直接显示；
   真实命令、参数、退出码和有界 stdout/stderr 放在点击详情中，不会把完整文件内容或
-  无限输出直接塞进主时间线。
+  无限输出直接塞进主时间线。实时状态、任务证据和执行时间线使用独立卡片；成功、警告、
+  失败和普通信息分别使用不同的低饱和背景色，长内容自动换行且不会产生横向滚动条。
 - 成功的 `edit_file` 步骤采用 Diff-first 展示：文件路径和 `@@ 行号 @@` 位于步骤顶部，
-  紧接着显示有界的 `- 修改前 / + 修改后` 与 `✓ Applied`；点击步骤可以查看更完整的
-  Unified Diff。失败的编辑不会展示为已发生的修改。
-- 右侧 `TASK EVIDENCE` 卡片汇总文件/目录变更数量、Verification、Stop Reason、Steps、
-  Tool Calls 和 Duration。每个 GUI 任务会自动保存一份有界 JSON Trace；`Export Trace`
-  可复制到指定位置，`Replay Trace` 只读重建工具时间线，不调用 LLM、不运行工具，也不
+  紧接着显示有界的 `- 修改前 / + 修改后` 与“✓ 已应用”；点击步骤会打开富文本详情，
+  新增行使用绿色、删除行使用红色、修改位置使用蓝色，并按区段展示技术参数与执行结果。
+  失败的编辑不会展示为已发生的修改。
+- 右侧“任务证据”卡片汇总文件/目录变更数量、验证状态、停止原因、步骤、
+  工具调用和耗时。每个 GUI 任务会自动保存一份有界 JSON Trace；“导出轨迹”
+  可复制到指定位置，“回放轨迹”只读重建工具时间线，不调用 LLM、不运行工具，也不
   修改 Workspace。Windows 默认 Trace 目录为 `%LOCALAPPDATA%/MiniCodingAgent/traces`，
   自动 Trace 默认保留最近 100 份、30 天；用户导出的副本不参与自动清理。
-- 顶部 `Safety Mode` 在 Tool handler 或 subprocess 启动前生效：`Ask` 对修改和命令弹出
-  非阻塞授权卡片；`Auto Edit` 自动允许文件/目录修改但询问命令；`Auto` 继续服从现有
-  Runtime Command Policy 自动执行；`Read Only` 只允许 List/Read/Search。演示时可选择
-  Auto，讲解安全边界时可切换 Ask 或 Read Only。
-- 底部状态栏显示 Agent 状态、步数、Verification、工具调用数量和耗时。
+- 顶部“安全模式”在 Tool handler 或 subprocess 启动前生效：“询问”对修改和命令弹出
+  非阻塞授权卡片；“自动编辑”自动允许文件/目录修改但询问命令；“全自动”继续服从现有
+  Runtime Command Policy 自动执行；“只读”只允许 List/Read/Search。
+- 底部状态栏显示智能体状态、步数、验证状态、工具调用数量和耗时。
 - 顶部太阳/月亮图标可以即时切换亮色和暗色主题，不会清空当前会话。
 
 LLM 请求和 Agent Loop 在 `QThread` Worker 中执行，主线程只处理 Qt 界面更新。
@@ -138,14 +141,14 @@ Stop 使用协作式取消：流式 LLM 请求会在收到下一个数据块时�
 100ms 检查一次取消状态并终止直接子进程；Agent 仍只在协议安全的步骤边界修改
 Conversation。它不会强制终止 Python Worker 线程，也不是操作系统级进程沙箱。
 
-任务运行期间，中间输入区保持可用，`Run Task` 会变成 `Send Update`。此时提交的文字
+任务运行期间，中间输入区保持可用，“运行任务”会变成“发送补充指令”。此时提交的文字
 会进入线程安全的 steering 队列，在当前操作结束后的下一个 Agent Step 作为新 User
 Message 生效。如果消息恰好在模型生成最终回答期间到达，Runtime 会继续下一步处理，
 不会静默丢弃它。`AgentMessageQueue` 也提供独立的 follow-up 队列，Worker 会在当前任务
 完成后按加入顺序执行。
 
 GUI 默认会在每次任务结束后把 Conversation 快照交给单线程后台写入器，并在再次打开
-相同 Workspace 时恢复；顶部 `Auto-save` 可以随时关闭自动保存，`Clear Saved` 经确认后
+相同 Workspace 时恢复；顶部“自动保存”可以随时关闭自动保存，“清除存档”经确认后
 删除全部 Workspace 的已保存会话。Windows 默认保存到
 `%LOCALAPPDATA%/MiniCodingAgent/sessions`；其他平台使用用户目录下的
 `.mini-coding-agent/MiniCodingAgent/sessions`。文件名由平台规范化后的 Workspace 路径
@@ -161,7 +164,7 @@ Tool Result 协议组压缩较早结果并保留最近上下文；如果受保�
 超限，则拒绝写入而不会产生半个文件。默认只保留最近 20 个、30 天内的会话。Unix 会话
 目录和文件分别使用 `0700` / `0600` 权限。保存内容是本地明文消息、模型名和时间戳，
 可能包含源代码与有界工具输出，但不保存 API Key；敏感项目可关闭 Auto-save。
-`New Session` / `Clear Conversation` 会删除当前 Workspace 的已保存会话。
+“新建会话”/“清空对话”会删除当前 Workspace 的已保存会话。
 
 选择 Workspace 只会刷新文件树并为下一次任务创建相应的 Tool Registry；文件读写和
 命令执行仍通过现有 Runtime 的规范路径检查，GUI 不会绕过 Workspace Boundary。

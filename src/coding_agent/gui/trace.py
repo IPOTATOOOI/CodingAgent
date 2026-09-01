@@ -9,13 +9,13 @@ from coding_agent.llm import ToolCall
 
 
 TOOL_LABELS = {
-    "read_file": "Read",
-    "search_text": "Search",
-    "list_directory": "List",
-    "create_directory": "Create Dir",
-    "write_file": "Create",
-    "edit_file": "Edit",
-    "run_command": "Run",
+    "read_file": "读取",
+    "search_text": "搜索",
+    "list_directory": "浏览",
+    "create_directory": "创建目录",
+    "write_file": "新建文件",
+    "edit_file": "修改",
+    "run_command": "运行",
 }
 
 
@@ -75,11 +75,11 @@ def format_tool_call(tool_call: ToolCall) -> TracePresentation:
             "version": ("检查开发环境", "确认所需命令或运行时在当前环境中可用。"),
             "command": ("运行开发命令", "执行项目命令，并根据真实输出决定下一步。"),
         }[kind]
-        command_text = _bounded(" ".join(command) or "<empty command>", 120)
+        command_text = _bounded(" ".join(command) or "<空命令>", 120)
         summary = f"{purpose} 命令：{command_text}"
     else:
         title = f"执行工具 {tool_call.name}"
-        summary = "Agent 正在调用 Runtime 提供的项目工具。"
+        summary = "智能体正在调用 Runtime 提供的项目工具。"
 
     visible = {
         key: value
@@ -126,20 +126,20 @@ def format_tool_result(
     if tool_call.name == "list_directory":
         count = len(data.get("entries", []))
         title = "目录查看完成"
-        summary = f"发现 {count} 个文件或目录，Agent 将从中选择相关内容继续检查。"
+        summary = f"发现 {count} 个文件或目录，智能体将从中选择相关内容继续检查。"
     elif tool_call.name == "read_file":
         title = "文件读取完成"
         start = data.get("start_line")
         end = data.get("end_line")
-        summary = f"已读取 {path} 的第 {start}–{end} 行，Agent 可以据此分析代码。"
+        summary = f"已读取 {path} 的第 {start}–{end} 行，智能体可以据此分析代码。"
     elif tool_call.name == "search_text":
         count = len(data.get("matches", []))
         if count:
             title = "已找到相关代码"
-            summary = f"找到 {count} 处匹配，Agent 将检查这些位置。"
+            summary = f"找到 {count} 处匹配，智能体将检查这些位置。"
         else:
             title = "没有找到匹配内容"
-            summary = "当前关键词没有结果，Agent 需要调整搜索方式。"
+            summary = "当前关键词没有结果，智能体需要调整搜索方式。"
     elif tool_call.name == "create_directory":
         created = data.get("created_directories", [])
         count = len(created) if isinstance(created, list) else 1
@@ -182,7 +182,7 @@ def _format_command_result(
         tone = "warning"
     elif timed_out:
         title = "命令执行超时"
-        summary = "命令没有在规定时间内结束，Agent 将根据已有输出调整策略。"
+        summary = "命令没有在规定时间内结束，智能体将根据已有输出调整策略。"
         tone = "error"
     elif exit_code == 0 and kind == "test":
         title = "项目测试通过"
@@ -190,7 +190,7 @@ def _format_command_result(
         tone = "success"
     elif exit_code != 0 and kind == "test":
         title = "项目测试失败"
-        summary = f"测试发现问题（退出码 {exit_code}），Agent 将根据错误继续定位和修复。"
+        summary = f"测试发现问题（退出码 {exit_code}），智能体将根据错误继续定位和修复。"
         tone = "error"
     elif exit_code == 0 and kind == "syntax":
         title = "语法检查通过"
@@ -202,14 +202,14 @@ def _format_command_result(
         tone = "error"
     elif exit_code == 0:
         title = "命令执行成功"
-        summary = "命令正常结束，Agent 将使用这个结果判断下一步。"
+        summary = "命令正常结束，智能体将使用这个结果判断下一步。"
         tone = "success"
     else:
         title = "命令执行失败"
-        summary = f"命令返回退出码 {exit_code}；这是一条观察结果，Agent 可以继续处理。"
+        summary = f"命令返回退出码 {exit_code}；这是一条观察结果，智能体可以继续处理。"
         tone = "error"
 
-    command_text = " ".join(command) or "<empty command>"
+    command_text = " ".join(command) or "<空命令>"
     details = (
         f"命令：{command_text}\n"
         f"工作目录：{data.get('cwd', arguments.get('cwd', '.'))}\n"
@@ -226,17 +226,17 @@ def _friendly_error(error: str) -> tuple[str, str, str]:
     messages = {
         "CommandBlocked": (
             "命令已被安全策略阻止",
-            "Runtime 在进程启动前拦截了不允许的命令，Agent 需要改用安全方案。",
+            "Runtime 在进程启动前拦截了不允许的命令，智能体需要改用安全方案。",
             "warning",
         ),
         "RepeatedAction": (
             "检测到重复操作",
-            "相同操作连续出现且没有带来新信息，Runtime 要求 Agent 调整策略。",
+            "相同操作连续出现且没有带来新信息，Runtime 要求智能体调整策略。",
             "warning",
         ),
         "RepeatedObservation": (
             "已有相同的查看结果",
-            "Workspace 尚未变化，Runtime 跳过了重复读取；Agent 应使用已有信息并采取下一步行动。",
+            "工作区尚未变化，Runtime 跳过了重复读取；智能体应使用已有信息并采取下一步行动。",
             "warning",
         ),
         "Cancelled": (
@@ -246,32 +246,32 @@ def _friendly_error(error: str) -> tuple[str, str, str]:
         ),
         "FileNotFound": (
             "目标文件不存在",
-            "Agent 使用的路径没有对应文件，需要重新查看项目结构。",
+            "智能体使用的路径没有对应文件，需要重新查看项目结构。",
             "error",
         ),
         "FileAlreadyExists": (
             "文件已经存在",
-            "创建操作没有覆盖现有文件，Agent 应改用 Edit 或选择新路径。",
+            "创建操作没有覆盖现有文件，智能体应改用 edit_file 或选择新路径。",
             "warning",
         ),
         "DirectoryAlreadyExists": (
             "目录已经存在",
-            "Runtime 没有覆盖现有目录，Agent 可以直接继续使用它。",
+            "Runtime 没有覆盖现有目录，智能体可以直接继续使用它。",
             "warning",
         ),
         "ApprovalRejected": (
             "用户拒绝了这一步",
-            "工具尚未执行，Agent 会收到拒绝结果并调整方案。",
+            "工具尚未执行，智能体会收到拒绝结果并调整方案。",
             "warning",
         ),
         "ReadOnlyMode": (
             "只读模式已阻止这一步",
-            "当前 Safety Mode 不允许修改文件或运行命令，工具没有执行。",
+            "当前安全模式不允许修改文件或运行命令，工具没有执行。",
             "warning",
         ),
         "PathOutsideWorkspace": (
-            "操作超出 Workspace",
-            "安全边界拒绝了 Workspace 之外的路径。",
+            "操作超出工作区",
+            "安全边界拒绝了工作区之外的路径。",
             "warning",
         ),
     }
@@ -279,7 +279,7 @@ def _friendly_error(error: str) -> tuple[str, str, str]:
         error,
         (
             "这一步没有完成",
-            f"Runtime 返回 {error}，Agent 会把它作为观察结果并决定是否继续。",
+            f"Runtime 返回 {error}，智能体会把它作为观察结果并决定是否继续。",
             "error",
         ),
     )

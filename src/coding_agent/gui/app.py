@@ -12,15 +12,15 @@ from coding_agent.gui.main_window import MainWindow
 
 def main(argv: list[str] | None = None) -> int:
     """启动 Mini Coding Agent 桌面应用。"""
-    parser = argparse.ArgumentParser(description="Mini Coding Agent GUI")
-    parser.add_argument("--workspace", default=".", help="initial workspace")
-    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
+    parser = argparse.ArgumentParser(description="Mini Coding Agent 图形界面")
+    parser.add_argument("--workspace", default=".", help="初始工作区")
+    parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS, help="最大步骤数")
     arguments = parser.parse_args(argv)
     workspace = Path(arguments.workspace).resolve()
     if not workspace.is_dir():
-        parser.error(f"workspace is not a directory: {workspace}")
+        parser.error(f"工作区不是有效目录：{workspace}")
     if arguments.max_steps < MIN_MAX_STEPS:
-        parser.error(f"max-steps must be at least {MIN_MAX_STEPS}")
+        parser.error(f"max-steps 必须至少为 {MIN_MAX_STEPS}")
 
     application = QApplication.instance() or QApplication(sys.argv[:1])
     application.setApplicationName("Mini Coding Agent")
